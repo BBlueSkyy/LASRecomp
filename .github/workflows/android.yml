@@ -27,7 +27,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      # ubuntu-24.04 runner already includes Android cmdline-tools.
       - name: Install Android SDK packages
         run: |
           yes | sdkmanager --licenses >/dev/null || true
