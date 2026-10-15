@@ -30,6 +30,12 @@ jobs:
           echo "ANDROID_NDK_HOME=$SDKROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+      # Validate checked-in Gradle wrappers before extracting SDL sources,
+      # whose bundled third-party wrapper is not used for this Android build.
+      # Wrapper validation stays enabled for our repository.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
       - uses: actions/cache@v4
         with:
           path: android/deps
@@ -43,9 +49,6 @@ jobs:
           tools/test_android_vulkan_caps.sh
           python3 tools/android/test_module.py
           android/tests/run.sh
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
       - name: Build runtime ARM64 APK
         run: gradle -p android :app:assembleDebug --no-daemon --stacktrace
       - name: Verify runtime ELF and absence of game code
