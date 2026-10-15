@@ -6,6 +6,7 @@
 #include <android/native_window_jni.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,10 +25,80 @@ static jstring utf(JNIEnv *env, const char *s) {
     return (*env)->NewStringUTF(env, s);
 }
 
+// Keep diagnostics bounded; the information is shown only in this app.
+static void report_append(char *out, size_t capacity, size_t *len, const char *fmt, ...) {
+    if (*len >= capacity) return;
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(out + *len, capacity - *len, fmt, args);
+    va_end(args);
+    if (written < 0) return;
+    size_t available = capacity - *len;
+    *len += (size_t)written >= available ? available - 1 : (size_t)written;
+}
+
+// /proc/self/maps identifies a collision without guessing why Bionic/ART mapped it.
+// Never unmap someone else's allocation; never use MAP_FIXED to "fix" EEXIST.
+static void report_guest_collisions(char *out, size_t capacity, size_t *len) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) {
+        report_append(out, capacity, len,
+            "Mapeamentos: /proc/self/maps indisponivel (errno %d)\n", errno);
+        return;
+    }
+    char line[1024];
+    unsigned overlaps = 0;
+    while (fgets(line, sizeof line, maps)) {
+        unsigned long long lo = 0, hi = 0;
+        char permissions[5] = {0};
+        if (sscanf(line, "%llx-%llx %4s", &lo, &hi, permissions) != 3) continue;
+        if (lo >= (uint64_t)GUEST_HI || hi <= (uint64_t)GUEST_LO) continue;
+        if (overlaps < 5) {
+            report_append(out, capacity, len,
+                "  Colisao %u: 0x%llx..0x%llx (%s)\n",
+                overlaps + 1, lo, hi, permissions);
+        }
+        overlaps++;
+    }
+    fclose(maps);
+    report_append(out, capacity, len,
+        "Total de mapeamentos que colidem: %u%s\n",
+        overlaps, overlaps > 5 ? " (primeiros 5 exibidos)" : "");
+}
+
+// Find out if the issue is the chosen base, rather than the requested length.
+// These are diagnostic probes, not a relocation implementation.
+static void probe_alternate_windows(char *out, size_t capacity, size_t *len) {
+    const uint64_t bases[] = {
+        0x5000000000ull, 0x4000000000ull,
+        0x3000000000ull, 0x6000000000ull
+    };
+    const size_t length = (size_t)((uint64_t)GUEST_HI - (uint64_t)GUEST_LO);
+    for (size_t i = 0; i < sizeof bases / sizeof bases[0]; ++i) {
+        const void *address = (const void *)(uintptr_t)bases[i];
+        errno = 0;
+        void *trial = mmap((void *)address, length, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE,
+            -1, 0);
+        if (trial == MAP_FAILED) {
+            report_append(out, capacity, len,
+                "Janela alternativa 0x%llx: errno %d\n",
+                (unsigned long long)bases[i], errno);
+        } else {
+            int exact = trial == address;
+            report_append(out, capacity, len,
+                "Janela alternativa 0x%llx: %s (teste apenas)\n",
+                (unsigned long long)bases[i],
+                exact ? "DISPONIVEL" : "endereco divergente");
+            munmap(trial, length);
+        }
+    }
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_bblueskyy_lasrecomp_MainActivity_probeHost(JNIEnv *env, jclass type) {
     (void)type;
-    char message[2048];
+    char message[4096];
     size_t n = 0;
     n += (size_t)snprintf(message + n, sizeof(message) - n,
             "Host: Android ARM64\nEnderecos guest: 0x%" PRIx64 "..0x%" PRIx64
@@ -44,8 +115,16 @@ Java_com_bblueskyy_lasrecomp_MainActivity_probeHost(JNIEnv *env, jclass type) {
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE |
                        MAP_FIXED_NOREPLACE, -1, 0);
     if (arena == MAP_FAILED) {
-        n += (size_t)snprintf(message + n, sizeof(message) - n,
-                "Reserva guest: FALHOU (errno %d: %s)\n", errno, strerror(errno));
+        const int original_error = errno;
+        report_append(message, sizeof message, &n,
+                "Reserva guest original: FALHOU (errno %d: %s)\n",
+                original_error, strerror(original_error));
+        if (original_error == EEXIST) {
+            report_guest_collisions(message, sizeof message, &n);
+        }
+        probe_alternate_windows(message, sizeof message, &n);
+        report_append(message, sizeof message, &n,
+                "Alternativas sao diagnosticas; runtime original ainda nao foi realocado.\n");
     } else {
         int exact = arena == (void *)(uintptr_t)GUEST_LO;
         n += (size_t)snprintf(message + n, sizeof(message) - n,
@@ -175,7 +254,9 @@ Java_com_bblueskyy_lasrecomp_MainActivity_presentTestFrame(
     for (uint32_t i = 0; i < gpuCount && !gpu; i++) {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(gpus[i], &props);
-        if (props.apiVersion < VK_API_VERSION_1_3) continue;
+        // A clear-to-swapchain diagnostic uses Vulkan 1.0 core + KHR_swapchain.
+        // The original game's renderer STILL requires Vulkan 1.3.
+        if (props.apiVersion < VK_API_VERSION_1_0) continue;
         uint32_t count = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(gpus[i], &count, NULL);
         VkQueueFamilyProperties *q = calloc(count, sizeof(*q));
@@ -191,7 +272,7 @@ Java_com_bblueskyy_lasrecomp_MainActivity_presentTestFrame(
         free(q);
     }
     free(gpus);
-    if (!gpu) { step = "GPU Vulkan 1.3 com fila de apresentacao"; rc = VK_ERROR_FEATURE_NOT_PRESENT; goto done; }
+    if (!gpu) { step = "Nenhuma GPU com fila grafica e presentacao Vulkan"; rc = VK_ERROR_FEATURE_NOT_PRESENT; goto done; }
 
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo qci = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -321,11 +402,11 @@ Java_com_bblueskyy_lasrecomp_MainActivity_presentTestFrame(
     step = "vkQueuePresentKHR";
     rc = vkQueuePresentKHR(queue, &present);
     if (rc != VK_SUCCESS && rc != VK_SUBOPTIMAL_KHR) goto done;
-    step = "OK: quadro sintetico Vulkan apresentado";
+    step = "OK: quadro sintetico Vulkan apresentado (Vulkan 1.0+ / swapchain)";
     rc = VK_SUCCESS;
 done:
     snprintf(text, sizeof(text), "%s (VkResult %d)\n"
-             "NOTA: nao e um quadro do jogo.", step, (int)rc);
+             "NAO e um quadro do jogo. Renderer original exige Vulkan 1.3.", step, (int)rc);
     if (device) vkDeviceWaitIdle(device);
     if (pool) vkDestroyCommandPool(device, pool, NULL);
     if (finished) vkDestroySemaphore(device, finished, NULL);

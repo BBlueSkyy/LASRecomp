@@ -47,12 +47,12 @@ public final class MainActivity extends Activity {
         root.addView(warning);
 
         Button test = new Button(this);
-        test.setText("Testar Vulkan e memória guest");
+        test.setText("Diagnóstico de colisões e Vulkan");
         root.addView(test);
         test.setOnClickListener(v -> invoke("Diagnóstico", () -> probeHost()));
 
         Button present = new Button(this);
-        present.setText("Apresentar um quadro Vulkan de teste");
+        present.setText("Testar apresentação Vulkan 1.1+");
         root.addView(present);
         present.setOnClickListener(v -> {
             Surface s = surfaceView.getHolder().getSurface();

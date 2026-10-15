@@ -33,3 +33,26 @@ file picker only stores a URI. No game assets are copied or generated.
 
 The synthetic frame should be reported as a Vulkan host-backend test only.
 Linux aarch64 remains experimental upstream, so Android gameplay is unproven.
+
+
+## Moto G100: initial results and corrected probe
+
+The first test on the Moto G100 reported EEXIST when attempting to reserve
+the original 0x7000000000..0x7320000000 guest window, and Qualcomm's system
+Vulkan 1.1.128 driver. This does NOT mean physical RAM exhaustion. The revised
+diagnostic lists conflicting /proc/self/maps mappings, and safely probes
+four alternative 12.5-GiB virtual windows without overwriting any mappings.
+
+The Vulkan swapchain-only test now accepts Vulkan 1.0+ with
+VK_KHR_swapchain rather than incorrectly requiring Vulkan 1.3 for a solid-color
+clear. The **original game renderer still requires Vulkan 1.3**; a successful
+solid-color frame on Qualcomm's proprietary Vulkan 1.1 driver is only proof
+that Android Surface/presentation works. The future game port needs a Vulkan
+1.3-capable driver such as a compatible user-provided Turnip build, together
+with a legitimate per-app custom driver loader, or a separately validated
+Vulkan 1.1 renderer fallback.
+
+An alternative available virtual range is not automatically usable. The
+upstream runtime/generator assume guest addresses equal host pointers and
+recompilation-address constants. Relocating the guest address-space requires a
+coherent architecture decision, not a one-line change to GUEST_LO.
