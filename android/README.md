@@ -1,58 +1,47 @@
-# LASRecomp Android — ARM64 port (milestone 1)
+# LASRecomp Android ARM64 runtime port
 
-This is a **diagnostic APK**, not a playable game. No Nintendo assets, ROM,
-game code, or user game dumps are contained in the repository or release.
+This development APK now links the original runtime. It is **not a self-contained playable port yet**: on-device generation/compilation of the game module is not bundled, and no real game frame has been verified on Android. No Nintendo files or generated game code are included.
 
-Build with JDK 17, Android SDK 35, NDK 27.2.12479018, CMake 3.22.1 and Gradle 8.9:
+## Build
 
-    cd android
-    gradle :app:assembleDebug
+Use JDK17, SDK35, NDK27.2.12479018, CMake3.22.1 and Gradle8.9. On Linux:
 
-Output: android/app/build/outputs/apk/debug/app-debug.apk (path from repo root).
+```sh
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+tools/android-deps.sh
+gradle -p android :app:assembleDebug
+```
 
-The Android activity currently:
-- probes the upstream guest address range defined in runtime/rt.h (12.5 GiB
-  virtual reservation at the exact guest address without MAP_FIXED clobbering);
-- enumerates actual Vulkan devices and API versions;
-- creates a genuine Android Surface / Vulkan swapchain and submits one
-  **synthetic solid-color image**, not a game frame;
-- persists a Storage Access Framework permission for the user's extracted
-  v1.0.0 directory and checks exefs/ and romfs/ exist.
+The dependency script builds pinned SDL3, shaderc and LGPL FFmpeg, and installs Vulkan/VMA headers. CMake links the complete loader, kernel, dispatch, HLE/services, NVN command processing, Maxwell shader translation, Vulkan renderer, ImGui and SDL audio/input. The APK contains ARM64 libraries only. Native libraries use 16KB-compatible ELF alignment; guest access remains at the original addresses.
 
-The runtime has not been linked into the app yet. Remaining work includes:
-1. SDL3 Android integration and original Vulkan game backend.
-2. Android/Bionic implementation of platform abstraction: threads, signals,
-   address-space setup, reset tables, lifecycle and paths.
-3. Android-compatible game module loading while retaining GAMELIB_ID/ABI.
-4. Host-side generation/compilation of guest code from the player's own
-   legally obtained Link's Awakening v1.0.0 files without Termux.
-5. File import, input, FFmpeg, audio, real game boot and rendering.
+The workflow `.github/workflows/android.yml` builds dependencies, runs host regressions, builds the APK and checks exported SDL entry/game-code absence. The artifact is `LASRecomp-Android-arm64-runtime-dev`.
 
-**Never interpret a SAF document ID as a filesystem path.** The current
-file picker only stores a URI. No game assets are copied or generated.
+## Actual implemented paths
 
-The synthetic frame should be reported as a Vulkan host-backend test only.
-Linux aarch64 remains experimental upstream, so Android gameplay is unproven.
+- SAF imports extracted `exefs/` and `romfs/` recursively into private storage, with staged replacement and rollback. NSO/build-ID checks require the existing v1.0.0 static recompiler input. The URI is never treated as a native path.
+- `GameActivity` runs in `:game`, loads a lightweight memory platform before SDL/heavy runtime, and invokes the original runtime through `SDL_main`.
+- Bionic platform uses actual pthreads, monotonic timing, TLS signal stacks, fault reporting and unwind backtraces. Runtime callbacks are registered before guest threads start.
+- Exact guest reservation safely supports old kernels and reports conflicting VMAs. Reset keeps ownership and discards only owned anonymous pages. No foreign Android mapping is overwritten.
+- The original RomFS builder can prepare the raw `romfs.bin` consumed by services after module preflight succeeds.
+- Real Android Vulkan presentation uses the original NVN renderer. Required feature bits and extension dependencies are negotiated; missing capabilities are rejected. See [renderer contract](../runtime/nvn/vulkan/ANDROID.md).
+- SDL handles Android surface/lifecycle, physical gamepads and native audio. Touch controls feed the same keyboard bindings as the existing runtime; menus retain SDL touch input. The launcher exposes the last runtime log.
+- The loader validates ARM64 ELF, module ABI/ID, sorted address tables and executable function pointers. The original generator can build an Android module using the host-only [development helper](../tools/android/README.md).
 
+## Concrete remaining blockers
 
-## Moto G100: initial results and corrected probe
+1. **On-device generation and compilation:** the generator needs Android-hosted Python, Unicorn, Capstone and LZ4; the generated C needs an Android-hosted compiler/linker integrated into the APK. Desktop Python/NDK executables cannot run in an Android app. The host helper is validation infrastructure, not the requested user workflow. No stub reports that this work is done.
+2. **Occupied identity address range:** the early reservation can prevent later library collisions, but cannot evict ART/vendor mappings already occupying `0x7000000000..0x7320000000`. A layout that still collides cannot boot. Relocation requires systematic guest-to-host conversion across the generator, CPU memory helpers, loader, HLE and renderer; changing `GUEST_LO` is insufficient.
+3. **Device Vulkan capabilities/custom drivers:** API1.1 is accepted only with equivalent required features/extensions. The Moto G100 proprietary driver has not been proven to meet those requirements. The APK still uses the system loader; custom Turnip/libadrenotools integration is documented but not implemented.
+4. **Android gameplay validation:** actual guest boot, graphics, audio, controls and pause/resume remain unverified on hardware. Linking code is not evidence that the game runs.
 
-The first test on the Moto G100 reported EEXIST when attempting to reserve
-the original 0x7000000000..0x7320000000 guest window, and Qualcomm's system
-Vulkan 1.1.128 driver. This does NOT mean physical RAM exhaustion. The revised
-diagnostic lists conflicting /proc/self/maps mappings, and safely probes
-four alternative 12.5-GiB virtual windows without overwriting any mappings.
+## Tests and diagnostics
 
-The Vulkan swapchain-only test now accepts Vulkan 1.0+ with
-VK_KHR_swapchain rather than incorrectly requiring Vulkan 1.3 for a solid-color
-clear. The **original game renderer still requires Vulkan 1.3**; a successful
-solid-color frame on Qualcomm's proprietary Vulkan 1.1 driver is only proof
-that Android Surface/presentation works. The future game port needs a Vulkan
-1.3-capable driver such as a compatible user-provided Turnip build, together
-with a legitimate per-app custom driver loader, or a separately validated
-Vulkan 1.1 renderer fallback.
+```sh
+tools/test_android_platform.sh
+tools/test_android_prepare.sh
+tools/test_android_vulkan_caps.sh
+python3 tools/android/test_module.py
+android/tests/run.sh
+```
 
-An alternative available virtual range is not automatically usable. The
-upstream runtime/generator assume guest addresses equal host pointers and
-recompilation-address constants. Relocating the guest address-space requires a
-coherent architecture decision, not a one-line change to GUEST_LO.
+These use synthetic fixtures, not game data. The separate diagnostic screen retains the old synthetic Vulkan clear; it is never counted as a game frame. Capability tests and the optional host software-Vulkan smoke test do not validate Android game rendering.

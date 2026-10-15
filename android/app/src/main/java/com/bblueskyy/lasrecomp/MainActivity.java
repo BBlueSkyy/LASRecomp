@@ -1,141 +1,159 @@
 package com.bblueskyy.lasrecomp;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
-import android.database.Cursor;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
-import android.provider.DocumentsContract;
-import android.view.Surface;
-import android.view.SurfaceView;
-import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import java.util.HashSet;
-import java.util.Set;
+import java.io.File;
+import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
+import java.lang.ref.WeakReference;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+/** Android launcher and legal game-file import. The runtime has its own process. */
 public final class MainActivity extends Activity {
     private static final int REQUEST_TREE = 42;
-    private static final String KEY_TREE = "tree";
-    static { System.loadLibrary("las_android"); }
-    private static native String probeHost();
-    private static native String presentTestFrame(Surface surface);
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
-    private TextView report;
-    private SurfaceView surfaceView;
+    private static final ExecutorService IMPORTS = Executors.newSingleThreadExecutor();
+    private static volatile boolean importing;
+    private static volatile String importMessage = "";
+    private static volatile WeakReference<MainActivity> active = new WeakReference<>(null);
+    private TextView status;
+    private Button select, play, log;
+
+    // Existing diagnostic JNI entry points; launcher does not load runtime libraries.
+    static native String probeHost();
+    static native String presentTestFrame(android.view.Surface surface);
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        active = new WeakReference<>(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(24, 22, 24, 22);
+        int pad = (int)(20 * getResources().getDisplayMetrics().density);
+        root.setPadding(pad, pad, pad, pad);
         root.setBackgroundColor(Color.rgb(19, 23, 29));
-
-        TextView heading = new TextView(this);
-        heading.setText("LASRecomp • Android ARM64");
-        heading.setTextColor(Color.WHITE);
-        heading.setTextSize(22);
-        root.addView(heading);
-        TextView warning = new TextView(this);
-        warning.setText("APENAS diagnóstico. Ainda não executa o jogo.");
-        warning.setTextColor(Color.YELLOW);
-        root.addView(warning);
-
-        Button test = new Button(this);
-        test.setText("Diagnóstico de colisões e Vulkan");
-        root.addView(test);
-        test.setOnClickListener(v -> invoke("Diagnóstico", () -> probeHost()));
-
-        Button present = new Button(this);
-        present.setText("Testar apresentação Vulkan 1.1+");
-        root.addView(present);
-        present.setOnClickListener(v -> {
-            Surface s = surfaceView.getHolder().getSurface();
-            if (s == null || !s.isValid()) {
-                report.append("Surface ainda indisponível.\n");
-                return;
-            }
-            invoke("Quadro sintético", () -> presentTestFrame(s));
-        });
-
-        Button select = new Button(this);
-        select.setText("Selecionar arquivos extraídos v1.0.0");
-        root.addView(select);
+        TextView title = new TextView(this);
+        title.setText("LASRecomp • Android ARM64");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(24);
+        root.addView(title);
+        TextView help = new TextView(this);
+        help.setText("Importe uma cópia legal extraída de Link's Awakening v1.0.0. "
+                + "Selecione a pasta que contém exefs/ e romfs/. Os arquivos serão copiados "
+                + "para este aplicativo; reserve espaço livre para todos os dados.\n\n"
+                + "Port experimental: a geração ARM64 dentro do aplicativo ainda está incompleta. "
+                + "Importar os arquivos, sozinho, ainda não permite jogar nesta versão.");
+        help.setTextColor(Color.LTGRAY);
+        help.setPadding(0, pad, 0, pad);
+        root.addView(help);
+        select = new Button(this);
+        select.setText("Importar / substituir arquivos do jogo");
         select.setOnClickListener(v -> {
-            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-            startActivityForResult(i, REQUEST_TREE);
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivityForResult(intent, REQUEST_TREE);
         });
-
-        surfaceView = new SurfaceView(this);
-        root.addView(surfaceView, new LinearLayout.LayoutParams(-1,
-                (int)(200 * getResources().getDisplayMetrics().density)));
-        ScrollView scroll = new ScrollView(this);
-        report = new TextView(this);
-        report.setTextColor(Color.WHITE);
-        report.setTextIsSelectable(true);
-        report.setPadding(6, 14, 6, 14);
-        scroll.addView(report);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        setContentView(root);
-        report.setText("Port em andamento. O teste não contém dados do jogo.\n");
-        String prior = getPreferences(MODE_PRIVATE).getString(KEY_TREE, "");
-        if (!prior.isEmpty()) report.append("Pasta SAF registrada: " + prior + "\n");
+        root.addView(select);
+        play = new Button(this);
+        play.setText("Tentar iniciar o runtime");
+        play.setOnClickListener(v -> {
+            if (!GameFiles.isReady(gameRoot())) { refresh(); return; }
+            startActivity(new Intent(this, GameActivity.class));
+        });
+        root.addView(play);
+        Button diagnostic = new Button(this);
+        diagnostic.setText("Diagnóstico do aparelho");
+        diagnostic.setOnClickListener(v -> startActivity(new Intent(this, DiagnosticActivity.class)));
+        root.addView(diagnostic);
+        log = new Button(this);
+        log.setText("Ver log da última inicialização");
+        log.setOnClickListener(v -> showRuntimeLog());
+        root.addView(log);
+        status = new TextView(this);
+        status.setTextColor(Color.WHITE);
+        status.setTextIsSelectable(true);
+        status.setPadding(0, pad, 0, 0);
+        root.addView(status);
+        ScrollView page = new ScrollView(this);
+        page.setFillViewport(true);
+        page.addView(root, new ScrollView.LayoutParams(-1, -2));
+        setContentView(page);
+        File previous = new File(getFilesDir(), "extracted.previous");
+        if (!gameRoot().exists() && GameFiles.isReady(previous)) previous.renameTo(gameRoot());
+        refresh();
     }
 
-    private interface Probe { String execute(); }
-    private void invoke(String title, Probe probe) {
-        report.append("\n" + title + "...\n");
-        executor.execute(() -> {
-            String result;
-            try { result = probe.execute(); }
-            catch (Exception | LinkageError e) { result = e.toString(); }
-            final String message = result;
-            runOnUiThread(() -> report.append(message + "\n"));
-        });
+    private File gameRoot() { return new File(getFilesDir(), "extracted"); }
+
+    @Override protected void onResume() {
+        super.onResume();
+        active = new WeakReference<>(this);
+        refresh();
+    }
+
+    private void refresh() {
+        if (status == null) return;
+        boolean ready = GameFiles.isReady(gameRoot());
+        select.setEnabled(!importing);
+        play.setEnabled(ready && !importing);
+        log.setEnabled(new File(getFilesDir(), "lasrecomp.log").isFile());
+        status.setText(importMessage + (importMessage.isEmpty() ? "" : "\n\n")
+                + (ready ? "Arquivos importados. Pronto para tentar iniciar o runtime."
+                         : "Nenhuma importação completa. São necessários exefs/main, exefs/sdk e romfs/."));
+    }
+
+    private void showRuntimeLog() {
+        TextView text = new TextView(this);
+        text.setTextIsSelectable(true);
+        text.setPadding(20, 20, 20, 20);
+        try (RandomAccessFile file = new RandomAccessFile(new File(getFilesDir(), "lasrecomp.log"), "r")) {
+            long end = file.length(), start = Math.max(0, end - 32768);
+            file.seek(start);
+            byte[] data = new byte[(int)(end - start)];
+            file.readFully(data);
+            text.setText((start > 0 ? "… últimas 32 KiB …\n" : "")
+                    + new String(data, StandardCharsets.UTF_8));
+        } catch (Exception e) { text.setText("Não foi possível ler o log: " + e.getMessage()); }
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(text);
+        new AlertDialog.Builder(this).setTitle("Log do runtime").setView(scroll)
+                .setPositiveButton("Fechar", null).show();
+    }
+
+    private static void update(String message) {
+        importMessage = message;
+        MainActivity activity = active.get();
+        if (activity != null) activity.runOnUiThread(activity::refresh);
     }
 
     @Override protected void onActivityResult(int request, int result, Intent intent) {
         super.onActivityResult(request, result, intent);
-        if (request != REQUEST_TREE || result != RESULT_OK
-                || intent == null || intent.getData() == null) return;
+        if (request != REQUEST_TREE || result != RESULT_OK || intent == null
+                || intent.getData() == null || importing) return;
         Uri tree = intent.getData();
-        try {
-            getContentResolver().takePersistableUriPermission(
-                    tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            getPreferences(MODE_PRIVATE).edit().putString(KEY_TREE, tree.toString()).apply();
-            report.append("Pasta selecionada: " + tree + "\n" + checkTree(tree));
-        } catch (Exception e) {
-            report.append("Acesso SAF falhou: " + e + "\n");
-        }
-    }
-
-    private String checkTree(Uri tree) {
-        try {
-            String id = DocumentsContract.getTreeDocumentId(tree);
-            Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, id);
-            Set<String> names = new HashSet<>();
-            try (Cursor c = getContentResolver().query(children,
-                    new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME},
-                    null, null, null)) {
-                if (c != null) while (c.moveToNext()) names.add(c.getString(0));
+        importing = true;
+        update("Importando… Mantenha o aplicativo aberto.");
+        android.content.Context app = getApplicationContext();
+        IMPORTS.execute(() -> {
+            try {
+                new SafImporter(app.getContentResolver(), (files, bytes) -> update(String.format(
+                        Locale.getDefault(), "Importando: %d arquivos • %.1f MiB", files,
+                        bytes / (1024.0 * 1024.0)))).importTree(tree, app.getFilesDir());
+                update("Importação concluída.");
+            } catch (Exception e) {
+                update("Importação falhou: " + e.getMessage());
+            } finally {
+                importing = false;
+                update(importMessage);
             }
-            return names.contains("exefs") && names.contains("romfs")
-                ? "exefs/ e romfs/ encontrados. Importação ainda não implementada.\n"
-                : "Pasta não contém exefs/ e romfs/.\n";
-        } catch (Exception e) {
-            return "Não foi possível verificar a pasta: " + e + "\n";
-        }
-    }
-
-    @Override protected void onDestroy() {
-        executor.shutdown();
-        super.onDestroy();
+        });
     }
 }
