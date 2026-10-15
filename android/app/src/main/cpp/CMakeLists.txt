@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(LASRecompAndroid C)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+# Host diagnostics only; do not link this as a substitute for the game runtime.
+add_library(las_android SHARED android_probe.c)
+target_include_directories(las_android PRIVATE "../../../../../runtime")
+target_compile_definitions(las_android PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1)
+target_compile_options(las_android PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(las_android PRIVATE android vulkan log)
