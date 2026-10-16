@@ -18,6 +18,10 @@ public final class GameActivity extends SDLActivity {
         return new String[]{"las_platform", "SDL3", "lasrecomp"};
     }
     @Override protected String[] getArguments() {
+        // A capture from an earlier launch is not evidence that this boot rendered.
+        File oldFrame = new File(getFilesDir(), "first_guest_frame.png");
+        if (oldFrame.exists() && !oldFrame.delete())
+            throw new IllegalStateException("Cannot clear the previous private guest-frame capture");
         File module = new File(getFilesDir(), "module");
         configureGameModule(GameModule.isPresent(module)
                 ? new File(module, "lasgame.so").getAbsolutePath() : "");
