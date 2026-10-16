@@ -1,4 +1,6 @@
 plugins { id 'com.android.application' }
+def embeddedSetup = providers.gradleProperty('embeddedSetup').orElse('false').get().toBoolean()
+def customVulkan = providers.gradleProperty('customVulkan').orElse('false').get().toBoolean()
 android {
     namespace 'com.bblueskyy.lasrecomp'
     compileSdk 35
@@ -10,7 +12,13 @@ android {
         versionCode 2
         versionName '0.2.0-runtime-dev'
         ndk { abiFilters 'arm64-v8a' }
-        externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_shared', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON' } }
+        buildConfigField 'boolean', 'EMBEDDED_SETUP', embeddedSetup.toString()
+        buildConfigField 'boolean', 'CUSTOM_VULKAN', customVulkan.toString()
+        externalNativeBuild { cmake {
+            arguments '-DANDROID_STL=c++_shared', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON',
+                "-DLARECOMP_ANDROID_EMBEDDED_SETUP=${embeddedSetup ? 'ON' : 'OFF'}",
+                "-DLARECOMP_ANDROID_CUSTOM_VULKAN=${customVulkan ? 'ON' : 'OFF'}"
+        } }
     }
     externalNativeBuild {
         cmake {
@@ -18,6 +26,7 @@ android {
             version '3.22.1'
         }
     }
+    buildFeatures { buildConfig = true }
     packaging {
         jniLibs { useLegacyPackaging = true }
     }
@@ -27,5 +36,10 @@ android {
     }
     sourceSets {
         main.java.srcDirs += ['../deps/src/SDL/android-project/app/src/main/java']
+        if (embeddedSetup) {
+            main.assets.srcDirs += ['../deps/embedded-assets']
+            main.jniLibs.srcDirs += ['../deps/setup-jni']
+        }
+        if (customVulkan) main.jniLibs.srcDirs += ['../deps/driver-jni']
     }
 }

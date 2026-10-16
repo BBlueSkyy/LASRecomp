@@ -39,7 +39,7 @@ final class DriverImporter {
         }
         File meta = new File(stage, "meta.json");
         if (!meta.isFile() || meta.length() > 65536) throw new IOException("Missing or oversized meta.json");
-        JSONObject metadata = new JSONObject(Files.readString(meta.toPath(), StandardCharsets.UTF_8));
+        JSONObject metadata = new JSONObject(new String(Files.readAllBytes(meta.toPath()), StandardCharsets.UTF_8));
         String name = metadata.getString("name");
         String library = metadata.getString("libraryName");
         if (name.trim().isEmpty() || !library.matches("lib[A-Za-z0-9._-]+\\.so"))

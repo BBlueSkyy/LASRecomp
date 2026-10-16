@@ -20,7 +20,7 @@ import java.util.concurrent.Executors;
 
 /** Android launcher and legal game-file import. The runtime has its own process. */
 public final class MainActivity extends Activity {
-    private static final int REQUEST_TREE = 42;
+    private static final int REQUEST_TREE = 42, REQUEST_DRIVER = 43;
     private static final ExecutorService IMPORTS = Executors.newSingleThreadExecutor();
     private static volatile boolean importing;
     private static volatile String importMessage = "";
@@ -66,9 +66,32 @@ public final class MainActivity extends Activity {
         play.setText("Tentar iniciar o runtime");
         play.setOnClickListener(v -> {
             if (!GameFiles.isReady(gameRoot())) { refresh(); return; }
-            startActivity(new Intent(this, GameActivity.class));
+            Intent runtime = new Intent(this, GameActivity.class);
+            if (BuildConfig.CUSTOM_VULKAN) {
+                DriverImporter.addSelection(this, runtime);
+                runtime.putExtra("configure_driver", true);
+            }
+            if (BuildConfig.EMBEDDED_SETUP) PreparationActivity.start(this, runtime);
+            else startActivity(runtime);
         });
         root.addView(play);
+        if (BuildConfig.EMBEDDED_SETUP) play.setText("Preparar e iniciar (experimental)");
+        if (BuildConfig.CUSTOM_VULKAN) {
+            Button driver = new Button(this);
+            driver.setText("Importar e selecionar driver Turnip (.zip)");
+            driver.setOnClickListener(v -> {
+                Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                pick.setType("application/zip");
+                pick.addCategory(Intent.CATEGORY_OPENABLE);
+                pick.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivityForResult(pick, REQUEST_DRIVER);
+            });
+            root.addView(driver);
+            Button system = new Button(this);
+            system.setText("Usar driver do sistema");
+            system.setOnClickListener(v -> { DriverImporter.selectSystem(this); update("Driver do sistema selecionado."); });
+            root.addView(system);
+        }
         Button diagnostic = new Button(this);
         diagnostic.setText("Diagnóstico do aparelho");
         diagnostic.setOnClickListener(v -> startActivity(new Intent(this, DiagnosticActivity.class)));
@@ -136,6 +159,18 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent intent) {
         super.onActivityResult(request, result, intent);
+        if (request == REQUEST_DRIVER && result == RESULT_OK && intent != null && intent.getData() != null) {
+            Uri uri = intent.getData();
+            android.content.Context app = getApplicationContext();
+            IMPORTS.execute(() -> {
+                try {
+                    DriverImporter.Driver driver = DriverImporter.importZip(app, uri);
+                    DriverImporter.selectCustom(app, driver);
+                    update("Driver selecionado: " + driver.name);
+                } catch (Exception error) { update("Falha ao importar driver: " + error.getMessage()); }
+            });
+            return;
+        }
         if (request != REQUEST_TREE || result != RESULT_OK || intent == null
                 || intent.getData() == null || importing) return;
         Uri tree = intent.getData();

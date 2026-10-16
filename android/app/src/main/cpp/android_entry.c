@@ -3,6 +3,7 @@
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_system.h>
 #include <stdio.h>
+#include <jni.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include "gamelib.h"
@@ -43,4 +44,25 @@ int SDL_main(int argc, char **argv) {
         return 4;
     }
     return las_runtime_main(argc, argv);
+}
+
+// Configure one consistent Vulkan provider before the SDL runtime starts.
+JNIEXPORT void JNICALL
+Java_com_bblueskyy_lasrecomp_GameActivity_configureDriver(JNIEnv *env, jclass type,
+        jstring mode, jstring directory, jstring library, jstring native_dir, jstring temporary) {
+    (void)type;
+    jstring values[] = {mode, directory, library, native_dir, temporary};
+    const char *names[] = {"LARECOMP_VK_DRIVER", "LARECOMP_VK_DRIVER_DIR", "LARECOMP_VK_DRIVER_NAME",
+                          "LARECOMP_ANDROID_NATIVE_LIB_DIR", "LARECOMP_VK_TMP_DIR"};
+    for (unsigned i = 0; i < 5; ++i) {
+        const char *value = values[i] ? (*env)->GetStringUTFChars(env, values[i], NULL) : NULL;
+        if (!value) return;
+        int failed = setenv(names[i], value, 1);
+        (*env)->ReleaseStringUTFChars(env, values[i], value);
+        if (failed) {
+            jclass error = (*env)->FindClass(env, "java/lang/IllegalStateException");
+            if (error) (*env)->ThrowNew(env, error, "Cannot configure Android Vulkan provider");
+            return;
+        }
+    }
 }
