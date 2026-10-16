@@ -3,6 +3,7 @@
 import os
 import pathlib
 import shutil
+import signal
 import struct
 import subprocess
 import tempfile
@@ -75,11 +76,28 @@ with tempfile.TemporaryDirectory(prefix='las-boot-') as tmp:
         cases.append((name, directory, 'load-only', message))
     failed = []
     for name, directory, mode, message in cases:
-        p = subprocess.run([str(OUT / 'boot'), str(directory), mode], capture_output=True, text=True, timeout=20)
-        ok = p.returncode == 0 if message is None else p.returncode != 0 and message in p.stderr
-        print(('PASS ' if ok else 'FAIL ') + name)
+        with subprocess.Popen([str(OUT / 'boot'), str(directory), mode],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as p:
+            try:
+                stdout, stderr = p.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                # Read before SIGKILL: distinguish a runtime deadlock from the
+                # kernel/runner collecting a very large expected-abort core.
+                print('TIMEOUT ' + name, flush=True)
+                for entry in ('status', 'wchan'):
+                    try:
+                        print(entry + ':\n' + pathlib.Path(f'/proc/{p.pid}/{entry}').read_text(), flush=True)
+                    except OSError as error:
+                        print(str(error), flush=True)
+                p.kill()
+                stdout, stderr = p.communicate()
+                print(stderr[-6000:], flush=True)
+                raise
+        ok = p.returncode == 0 if message is None else p.returncode == -signal.SIGABRT and message in stderr
+        print(('PASS ' if ok else 'FAIL ') + name, flush=True)
         if not ok:
             failed.append(name)
-            print(p.stderr[-3000:])
+            print('exit status:', p.returncode)
+            print(stderr[-3000:])
     if failed:
         raise SystemExit('Failed: ' + ', '.join(failed))

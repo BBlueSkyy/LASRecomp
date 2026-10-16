@@ -1,0 +1,17 @@
+name: Runtime boot regression
+on:
+  push:
+    branches: [port/android-arm64]
+    paths: ['runtime/kernel.c', 'runtime/dispatch.c', 'runtime/loader.c', 'runtime/platform/**', 'tools/test_runtime_boot*', '.github/workflows/runtime-boot.yml']
+  workflow_dispatch:
+jobs:
+  boot:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Real runtime boot and expected fatal exits (synthetic NSOs)
+        env:
+          CC: clang
+        run: python3 tools/test_runtime_boot.py
