@@ -70,8 +70,8 @@ static void report_guest_collisions(char *out, size_t capacity, size_t *len) {
 // These are diagnostic probes, not a relocation implementation.
 static void probe_alternate_windows(char *out, size_t capacity, size_t *len) {
     const uint64_t bases[] = {
-        0x5000000000ull, 0x4000000000ull,
-        0x3000000000ull, 0x6000000000ull
+        0x1800000000ull, 0x2000000000ull,
+        0x3000000000ull, 0x4000000000ull
     };
     const size_t length = (size_t)((uint64_t)GUEST_HI - (uint64_t)GUEST_LO);
     for (size_t i = 0; i < sizeof bases / sizeof bases[0]; ++i) {
@@ -107,7 +107,8 @@ Java_com_bblueskyy_lasrecomp_MainActivity_probeHost(JNIEnv *env, jclass type) {
             (double)((uint64_t)GUEST_HI - (uint64_t)GUEST_LO) / (1024.0*1024*1024),
             sysconf(_SC_PAGESIZE));
 
-    // Probe the exact upstream fixed address without overwriting any mapping.
+    // Probe the paired Android runtime/guest layout, not the upstream desktop layout.
+    // The :game process has different VMAs, so a successful diagnostic is not a boot guarantee.
     size_t length = (size_t)((uint64_t)GUEST_HI - (uint64_t)GUEST_LO);
     errno = 0;
     void *arena = mmap((void *)(uintptr_t)GUEST_LO, length,
@@ -117,18 +118,19 @@ Java_com_bblueskyy_lasrecomp_MainActivity_probeHost(JNIEnv *env, jclass type) {
     if (arena == MAP_FAILED) {
         const int original_error = errno;
         report_append(message, sizeof message, &n,
-                "Reserva guest original: FALHOU (errno %d: %s)\n",
+                "Reserva guest Android: FALHOU (errno %d: %s)\n",
                 original_error, strerror(original_error));
         if (original_error == EEXIST) {
             report_guest_collisions(message, sizeof message, &n);
         }
         probe_alternate_windows(message, sizeof message, &n);
         report_append(message, sizeof message, &n,
-                "Alternativas sao diagnosticas; runtime original ainda nao foi realocado.\n");
+                "Janelas alternativas sao testes; cada mudança de base exige recompilar runtime e modulo ARM64.\n");
     } else {
         int exact = arena == (void *)(uintptr_t)GUEST_LO;
         n += (size_t)snprintf(message + n, sizeof(message) - n,
-                "Reserva guest: %s\n", exact ? "OK, endereco exato" : "endereco incorreto");
+                "Reserva guest neste processo de diagnostico: %s (nao prova disponibilidade no processo do jogo)\n",
+                exact ? "OK, endereco exato" : "endereco incorreto");
         // The boot-time reservation must be owned by the runtime, not this probe.
         munmap(arena, length);
     }
@@ -182,8 +184,9 @@ Java_com_bblueskyy_lasrecomp_MainActivity_probeHost(JNIEnv *env, jclass type) {
                     properties.deviceName, VK_API_VERSION_MAJOR(properties.apiVersion),
                     VK_API_VERSION_MINOR(properties.apiVersion),
                     VK_API_VERSION_PATCH(properties.apiVersion),
-                    properties.apiVersion >= VK_API_VERSION_1_3 ?
-                       "(compativel com requisito 1.3)" : "(abaixo do requisito 1.3)");
+                    properties.apiVersion < VK_API_VERSION_1_1 ?
+                        "(abaixo da API 1.1 minima do runtime)" :
+                        "(API suficiente para avaliar; extensoes e recursos NVN ainda nao verificados)");
             if (n > sizeof(message) - 300) break;
         }
     }
