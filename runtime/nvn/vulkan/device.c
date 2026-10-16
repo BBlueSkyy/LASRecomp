@@ -619,7 +619,7 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
 }
 
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
-void vk_frame_end(const char *shot_path) {
+void vk_frame_end(const char *shot_path, bool guest_frame) {
     if (!cur_frame.ok) return;
     if (shot_path && !g_vk.sc_readback) { LOG("[vk] window screenshots are unsupported by this presentation surface\n"); shot_path = NULL; }
     VkCommandBuffer cb = vk_cmd();
@@ -635,9 +635,21 @@ void vk_frame_end(const char *shot_path) {
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
 #ifdef __ANDROID__
+    // Only guest NVN texture presentation counts here. A synthetic diagnostic
+    // clear or the reboot black frame must never be reported as game output.
+    static bool first_guest_present_logged;
+    if (guest_frame && !first_guest_present_logged && (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR)) {
+        first_guest_present_logged = true;
+        LOG("[android] first guest NVN frame submitted to the Android swapchain (%ux%u); "
+            "pixel contents and screen visibility are not yet verified\n",
+            g_vk.sc_extent.width, g_vk.sc_extent.height);
+    }
     if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&android_surface_dirty, true);
 #endif
     if (r == VK_ERROR_DEVICE_LOST) VK_CHECK(r);
+#ifndef __ANDROID__
+    (void)guest_frame;
+#endif
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
     if (shot_path) {
@@ -722,7 +734,20 @@ void backend_present(NvnTexture *t) {
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)total_frames + 1 == win_shot;
-        vk_frame_end(shot ? "build/window.png" : NULL);
+        // One private screenshot from the *real guest* presentation path helps
+        // distinguish a booted game from a synthetic Vulkan clear on hardware.
+        // Never include it in CI artifacts: it may contain the owner's game.
+#ifdef __ANDROID__
+        static bool first_guest_capture_attempted;
+        const char *capture = shot ? "build/window.png" : NULL;
+        if (!first_guest_capture_attempted && g_vk.sc_readback) {
+            capture = "first_guest_frame.png";
+            first_guest_capture_attempted = true;
+        }
+        vk_frame_end(capture, true);
+#else
+        vk_frame_end(shot ? "build/window.png" : NULL, true);
+#endif
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
         renderer_submit();
@@ -905,7 +930,7 @@ void backend_reset(void) {
 void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)
 void backend_clear_window(void) {
     static const float black[4] = {0, 0, 0, 1};
-    if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
+    if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL, false);
 }
 
 int ui_run(void) {
