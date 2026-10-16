@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -70,6 +71,14 @@ int main(int argc, char **argv) {
     assert(prctl(PR_SET_DUMPABLE, 0) == 0);
     assert(prctl(PR_GET_DUMPABLE) == 0);
     plat_android_set_runtime_hooks(rt_fault_watch, rt_fault_report, NULL);
+    uint64_t *foreign = NULL;
+    if (!strcmp(argv[2], "foreign-canonical")) {
+        assert(GUEST_LO != 0x7000000000ull);
+        foreign = mmap((void *)0x7000000000ull, 0x4000, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        assert(foreign == (void *)0x7000000000ull);
+        *foreign = 0xcafe;
+    }
     assert(plat_reserve_guest(GUEST_LO, GUEST_HI));
     if (!strcmp(argv[2], "empty-table")) {
         empty_sdk = 1;
@@ -104,10 +113,12 @@ int main(int argc, char **argv) {
         kernel_stop_threads(NULL);
         kernel_reset();
         assert(plat_reset_guest(GUEST_LO, GUEST_HI));
+        if (foreign) assert(*foreign == 0xcafe);
         // Match production teardown, then load into the same Module records.
         g_nmodules = 0;
         loader_load(argv[1]);
         kernel_init();
     }
+    if (foreign) assert(munmap(foreign, 0x4000) == 0);
     return 0;
 }

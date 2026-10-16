@@ -5,6 +5,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 option(LARECOMP_ANDROID_CUSTOM_VULKAN "Experimental provider-owned Vulkan/Turnip loading" OFF)
 option(LARECOMP_ANDROID_EMBEDDED_SETUP "Experimental on-device generator/compiler" OFF)
+set(LARECOMP_GUEST_BASE "0x1000000000" CACHE STRING "Identity layout shared with the private lasgame module")
 get_filename_component(ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
 set(DEPS "${ROOT}/android/deps/arm64-v8a")
 set(SDL_SRC "${ROOT}/android/deps/src/SDL")
@@ -20,7 +21,8 @@ add_subdirectory("${SDL_SRC}" "${CMAKE_CURRENT_BINARY_DIR}/SDL")
 # Retain the independent host probe for diagnosing device capabilities.
 add_library(las_android SHARED android_probe.c)
 target_include_directories(las_android PRIVATE "${ROOT}/runtime")
-target_compile_definitions(las_android PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1)
+target_compile_definitions(las_android PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1
+    LARECOMP_GUEST_BASE=${LARECOMP_GUEST_BASE}ull)
 target_compile_options(las_android PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(las_android PRIVATE android vulkan log)
 
@@ -32,6 +34,7 @@ file(GLOB UI CONFIGURE_DEPENDS "${ROOT}/runtime/ui/*.mm")
 set_source_files_properties(${UI} PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x c++")
 set(IMGUI "${ROOT}/third_party/imgui")
 add_library(las_platform SHARED "${ROOT}/runtime/platform/android.c" "${ROOT}/runtime/platform/android_bootstrap.c")
+target_compile_definitions(las_platform PRIVATE LARECOMP_GUEST_BASE=${LARECOMP_GUEST_BASE}ull)
 target_include_directories(las_platform PRIVATE "${ROOT}/runtime")
 target_link_libraries(las_platform PRIVATE log dl)
 add_library(lasrecomp SHARED ${RT} ${UI} "${ROOT}/runtime/platform/android_prepare.c" android_entry.c
@@ -46,8 +49,10 @@ file(GLOB_RECURSE GAMELIB_INPUTS CONFIGURE_DEPENDS "${ROOT}/tools/*.py" "${ROOT}
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${GAMELIB_INPUTS}
     "${CMAKE_CURRENT_SOURCE_DIR}/embedded_compiler.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/python_generator.c")
 execute_process(COMMAND "${Python3_EXECUTABLE}" "${ROOT}/tools/android/gamelib_id.py" --root "${ROOT}"
+    --guest-base "${LARECOMP_GUEST_BASE}"
     OUTPUT_VARIABLE ANDROID_GAMELIB_ID OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-target_compile_definitions(lasrecomp PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1 GAMELIB_ID="${ANDROID_GAMELIB_ID}")
+target_compile_definitions(lasrecomp PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1 GAMELIB_ID="${ANDROID_GAMELIB_ID}"
+    LARECOMP_GUEST_BASE=${LARECOMP_GUEST_BASE}ull)
 target_compile_options(lasrecomp PRIVATE -fno-strict-aliasing -Wall -Wno-unused-function -Wno-format)
 # Compile the existing SMAA source string without modifying the upstream shader.
 file(READ "${ROOT}/third_party/smaa/SMAA.hlsl" SMAA)
@@ -101,7 +106,8 @@ if(LARECOMP_ANDROID_EMBEDDED_SETUP)
         "${ROOT}/runtime/platform/android_prepare.c" "${ROOT}/runtime/romfs_build.c")
     target_include_directories(las_setup PRIVATE "${ROOT}/runtime" "${COMPILER_ROOT}/include"
         "${PYTHON_ROOT}/include/python3.14")
-    target_compile_definitions(las_setup PRIVATE GAMELIB_ID="${ANDROID_GAMELIB_ID}")
+    target_compile_definitions(las_setup PRIVATE GAMELIB_ID="${ANDROID_GAMELIB_ID}"
+        LARECOMP_GUEST_BASE=${LARECOMP_GUEST_BASE}ull)
     target_compile_options(las_setup PRIVATE -fno-rtti -fno-strict-aliasing -Wall -Wno-format)
     target_link_options(las_setup PRIVATE "-Wl,--no-undefined")
     target_link_libraries(las_setup PRIVATE embedded_python "-Wl,--start-group" ${COMPILER_ARCHIVES}

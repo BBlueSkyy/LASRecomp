@@ -3,11 +3,14 @@
 import argparse
 import hashlib
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from address_layout import ANDROID_GUEST_BASE, SDK_OFFSET, guest_base
 
 # Same semantic inputs as Makefile's GAMELIB_SRCS. Include the Android build
 # contract as well: changing these flags invalidates already generated modules.
 SOURCES = (
-    "tools/gen.py", "tools/lifter.py", "tools/analyze.py", "tools/nso.py",
+    "tools/address_layout.py", "runtime/address_layout.h", "tools/gen.py", "tools/lifter.py", "tools/analyze.py", "tools/nso.py",
     "tools/passes.py", "tools/patches.py", "tools/simd_c.py",
     "tools/rando/patch_variants.json", "tools/gamelib_entry.c",
     "runtime/hle/hle_symbols.txt", "runtime/cpu.h", "runtime/simd.h",
@@ -24,11 +27,12 @@ LINK_FLAGS = (
     "-Wl,-z,max-page-size=16384", "-Wl,-z,common-page-size=16384",
     "-Wl,-soname,lasgame.so",
 )
-CONTRACT = ("android-arm64-v8a;api>=28;simd=asm;main=0x7000000000;sdk=0x7004000000;"
+CONTRACT = ("android-arm64-v8a;api>=28;simd=asm;layout=identity;"
             "runtime=liblasrecomp.so;" + " ".join(COMPILE_FLAGS + LINK_FLAGS))
 
 
-def gamelib_id(root: Path) -> str:
+def gamelib_id(root: Path, base=ANDROID_GUEST_BASE) -> str:
+    base = guest_base(base)
     digest = hashlib.sha256()
     for name in SOURCES:
         data = (root / name).read_bytes()
@@ -36,14 +40,16 @@ def gamelib_id(root: Path) -> str:
         digest.update(len(data).to_bytes(8, "little"))
         digest.update(data)
     digest.update(CONTRACT.encode())
+    digest.update(f";guest-base={base:#x};sdk-base={base + SDK_OFFSET:#x}".encode())
     return digest.hexdigest()[:16]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--guest-base", type=guest_base, default=ANDROID_GUEST_BASE)
     args = parser.parse_args()
-    print(gamelib_id(args.root))
+    print(gamelib_id(args.root, args.guest_base))
 
 
 if __name__ == "__main__":

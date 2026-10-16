@@ -1,6 +1,8 @@
 plugins { id 'com.android.application' }
 def embeddedSetup = providers.gradleProperty('embeddedSetup').orElse('false').get().toBoolean()
 def customVulkan = providers.gradleProperty('customVulkan').orElse('false').get().toBoolean()
+def guestBase = providers.gradleProperty('guestBase').orElse('0x1000000000').get()
+if (!(guestBase ==~ /0x[0-9a-fA-F]+/)) throw new GradleException('guestBase must be a hexadecimal address')
 android {
     namespace 'com.bblueskyy.lasrecomp'
     compileSdk 35
@@ -17,6 +19,7 @@ android {
         externalNativeBuild { cmake {
             arguments '-DANDROID_STL=c++_shared', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON',
                 "-DLARECOMP_ANDROID_EMBEDDED_SETUP=${embeddedSetup ? 'ON' : 'OFF'}",
+                "-DLARECOMP_GUEST_BASE=${guestBase}",
                 "-DLARECOMP_ANDROID_CUSTOM_VULKAN=${customVulkan ? 'ON' : 'OFF'}"
         } }
     }

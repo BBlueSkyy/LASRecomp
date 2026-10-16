@@ -75,7 +75,8 @@ def publish(game, module, identity, original_inputs):
         os.close(directory)
 
 
-def build_cached(game_dir, compiler_assets, identity, compile_one, link, progress=None):
+def build_cached(game_dir, compiler_assets, identity, compile_one, link, progress=None,
+                 guest_base=None):
     """Compile actual original-generator output through native in-process callbacks."""
     import fcntl
     from embedded_generate import generate
@@ -93,7 +94,7 @@ def build_cached(game_dir, compiler_assets, identity, compile_one, link, progres
         with tempfile.TemporaryDirectory(prefix='.las-build-', dir=game) as work:
             work = Path(work)
             report('Generating ARM64 C from the imported NSOs')
-            generate(str(game), str(work), report)
+            generate(str(game), str(work), report, guest_base=guest_base)
             sources = [Path(compiler_assets) / 'gamelib_entry.c']
             for module in ('main', 'sdk'):
                 sources += sorted((work / module).glob('*.c'))

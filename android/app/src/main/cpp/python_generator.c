@@ -1,4 +1,5 @@
 #include "python_generator.h"
+#include "address_layout.h"
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <pthread.h>
@@ -131,9 +132,10 @@ static int invoke(const char *root, const char *native_dir, const char *game,
     PyObject *link_callback = compile_callback ? PyCFunction_New(&link_method, NULL) : NULL;
     PyObject *generated = NULL;
     if (identity && callback && compile_callback && link_callback)
-        generated = PyObject_CallFunction(generate, "sssOOO", game, output, identity,
-                                           compile_callback, link_callback, callback);
-    else if (!identity && callback) generated = PyObject_CallFunction(generate, "ssO", game, output, callback);
+        generated = PyObject_CallFunction(generate, "sssOOOK", game, output, identity,
+                                           compile_callback, link_callback, callback, (unsigned long long)GUEST_LO);
+    else if (!identity && callback) generated = PyObject_CallFunction(generate, "ssOK", game, output, callback,
+                                                                      (unsigned long long)GUEST_LO);
     Py_XDECREF(compile_callback); Py_XDECREF(link_callback); Py_XDECREF(cache);
     if (generated) result = 0;
     else python_error(error, error_size);

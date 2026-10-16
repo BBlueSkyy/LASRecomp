@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gamelib_validate.h"
+#include "address_layout.h"
 #include <assert.h>
 #include <dlfcn.h>
 #include <elf.h>
@@ -24,8 +25,8 @@ static void allow(const void *p, size_t n, bool code) { regions[nregions++] = (R
 static void guest(Cpu *c) { c->x[0] = 1; }
 
 static void unit_tables(void) {
-    uint64_t main[] = {0x7000000000ull, 0x7000000004ull};
-    uint64_t sdk[] = {0x7004000000ull};
+    uint64_t main[] = {MAIN_BASE, MAIN_BASE + 4};
+    uint64_t sdk[] = {SDK_BASE};
     uint64_t nm = 2, ns = 1;
     GuestFn fns[] = {guest, guest};
     const char id[] = GAMELIB_ID;
@@ -44,7 +45,7 @@ static void unit_tables(void) {
     assert(!gamelib_validate_tables(&t, checked_range, NULL, why, sizeof why));
     main[1] = main[0] + 1;
     assert(!gamelib_validate_tables(&t, checked_range, NULL, why, sizeof why));
-    main[1] = 0x7004000000ull;
+    main[1] = SDK_BASE;
     assert(!gamelib_validate_tables(&t, checked_range, NULL, why, sizeof why));
     main[1] = main[0] + 4;
     fns[1] = (GuestFn)(uintptr_t)main;

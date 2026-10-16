@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from compilation_cache import build_cached, cache_ready
 from gamelib_id import COMPILE_FLAGS, LINK_FLAGS, gamelib_id
+from address_layout import ANDROID_GUEST_BASE
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -77,7 +78,7 @@ class EmbeddedGeneratorTests(unittest.TestCase):
                             str(source), str(ROOT / 'runtime/fnprof.c'), str(ROOT / 'runtime/platform/android.c'),
                             '-pthread', '-ldl', '-o', str(output)], check=True)
             library = ctypes.CDLL(str(output))
-            function = library.f_7000000080
+            function = library.f_1000000080
             function.argtypes = [ctypes.c_void_p]
             function.restype = None
             storage = ctypes.create_string_buffer(1040)
@@ -95,7 +96,7 @@ class EmbeddedGeneratorTests(unittest.TestCase):
                 subprocess.run([str(target), '-shared', '-fPIC', '-O1', '-I', str(ROOT / 'runtime'),
                                 str(ROOT / 'runtime/fnprof.c'), str(ROOT / 'runtime/platform/android.c'),
                                 '-Wl,-soname,liblasrecomp.so', '-llog', '-ldl', '-o', str(runtime)], check=True)
-                identity = gamelib_id(ROOT)
+                identity = gamelib_id(ROOT, ANDROID_GUEST_BASE)
                 compiled = []
 
                 def compile_one(unit, obj):

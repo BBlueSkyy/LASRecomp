@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """Real loader, kernel and dispatch integration with tiny original NSOs (Linux)."""
 import os
+import argparse
 import pathlib
 import shutil
 import signal
 import struct
 import subprocess
 import tempfile
+from address_layout import CANONICAL_GUEST_BASE, guest_base
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-OUT = ROOT / 'build/runtime_boot_test'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--guest-base', type=guest_base, default=CANONICAL_GUEST_BASE)
+args = parser.parse_args()
+OUT = ROOT / 'build/runtime_boot_test' / f'{args.guest_base:x}'
 OUT.mkdir(parents=True, exist_ok=True)
 CC = os.environ.get('CC') or shutil.which('clang')
 if not CC:
     raise SystemExit('clang is required (the runtime uses musttail); set CC to its path')
 subprocess.run([CC, '-D_GNU_SOURCE', '-Wno-macro-redefined', '-std=c11', '-O1', '-g', '-Wno-format', '-Iruntime',
+                f'-DLARECOMP_GUEST_BASE={args.guest_base:#x}ull',
                 '-pthread', 'tools/test_runtime_boot.c', 'runtime/loader.c', 'runtime/dispatch.c',
                 'runtime/kernel.c', 'runtime/platform/android.c', '-ldl', '-o', str(OUT / 'boot')],
                cwd=ROOT, check=True)
@@ -63,6 +69,8 @@ with tempfile.TemporaryDirectory(prefix='las-boot-') as tmp:
              ('zero main stack', valid, 'zero-stack', 'invalid main stack'),
              ('fatal from guest thread', valid, 'fatal-guest', 'brk #0'),
              ('signal from guest thread', valid, 'signal-guest', 'SIGILL accessing')]
+    if args.guest_base != CANONICAL_GUEST_BASE:
+        cases.append(('boot with canonical address occupied', valid, 'foreign-canonical', None))
     for name, mutate, message in [
         ('short-header', lambda b: b[:4], 'NSO header'),
         ('file-segment', lambda b: patch(b, 0x10, 0xfffffff0), 'segment'),

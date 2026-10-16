@@ -111,7 +111,7 @@ def install_lz4():
     sys.modules['lz4.block'] = block
 
 
-def generate(game_dir, output_dir, progress=None):
+def generate(game_dir, output_dir, progress=None, guest_base=None):
     """Generate both modules synchronously; raise the original error on failure."""
     import contextlib
     import io
@@ -119,6 +119,8 @@ def generate(game_dir, output_dir, progress=None):
     import runpy
     from pathlib import Path
 
+    from address_layout import ANDROID_GUEST_BASE, SDK_OFFSET, guest_base as validate_base
+    base_address = validate_base(ANDROID_GUEST_BASE if guest_base is None else guest_base)
     install_lz4()
     tools = Path(__file__).resolve().parent
     game = Path(game_dir)
@@ -161,7 +163,7 @@ def generate(game_dir, output_dir, progress=None):
     sink = Progress()
     try:
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-            for name, base in (('main', '0x7000000000'), ('sdk', '0x7004000000')):
+            for name, base in (('main', hex(base_address)), ('sdk', hex(base_address + SDK_OFFSET))):
                 sys.argv = [str(tools / 'gen.py'), name, str(game / 'exefs' / name), base,
                             str(output / name), '--simd', 'asm']
                 if name == 'sdk':

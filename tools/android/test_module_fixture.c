@@ -1,5 +1,6 @@
 // Synthetic code only: no game assets or generated proprietary code.
 #include "gamelib.h"
+#include "address_layout.h"
 #ifndef BAD_KIND
 #define BAD_KIND 0
 #endif
@@ -10,9 +11,9 @@ static void guest(Cpu *c) { c->x[0] = nonexistent_runtime_import(); }
 static void guest(Cpu *c) { c->x[0] = rt_ticks(); }
 #endif
 GAMELIB_EXPORT const GameLibTables *lasgame_tables(void) {
-    static const uint64_t main[] = {0x7000000000ull, 0x7000000004ull};
-    static const uint64_t unsorted[] = {0x7000000004ull, 0x7000000000ull};
-    static const uint64_t sdk[] = {0x7004000000ull};
+    static const uint64_t main[] = {MAIN_BASE, MAIN_BASE + 4};
+    static const uint64_t unsorted[] = {MAIN_BASE + 4, MAIN_BASE};
+    static const uint64_t sdk[] = {SDK_BASE};
     static const uint64_t count = 2, one = 1, zero = 0, huge = UINT64_MAX;
     static const GuestFn fns[] = {guest, guest};
     static const GuestFn bad_fns[] = {(GuestFn)(uintptr_t)1, guest};

@@ -16,6 +16,7 @@ import sys
 import tempfile
 
 from gamelib_id import COMPILE_FLAGS, LINK_FLAGS, gamelib_id
+from address_layout import ANDROID_GUEST_BASE, SDK_OFFSET, guest_base
 
 
 def run(args: list[str], **kwargs) -> None:
@@ -58,12 +59,12 @@ def build(args: argparse.Namespace) -> Path:
                 raise ValueError(f"{path} is not an extracted NSO")
     # Validate actual imports before starting a potentially lengthy generation.
     run([sys.executable, "-c", "import unicorn; import capstone; import lz4.block"], cwd=root / "tools")
-    identity = gamelib_id(root)
+    identity = gamelib_id(root, args.guest_base)
     output = (args.out or game / "lasgame.so").resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="lasgame-", dir=args.work_dir) as temp:
         work = Path(temp)
-        for name, base in (("main", "0x7000000000"), ("sdk", "0x7004000000")):
+        for name, base in (("main", hex(args.guest_base)), ("sdk", hex(args.guest_base + SDK_OFFSET))):
             command = [sys.executable, root / "tools/gen.py", name, game / "exefs" / name,
                        base, work / name, "--simd", "asm"]
             if name == "sdk":
@@ -109,6 +110,8 @@ def build(args: argparse.Namespace) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--guest-base", type=guest_base, default=ANDROID_GUEST_BASE,
+                        help="identity-address layout; must match the APK CMake LARECOMP_GUEST_BASE")
     parser.add_argument("--game-dir", type=Path, required=True)
     parser.add_argument("--ndk", type=Path, default=os.environ.get("ANDROID_NDK_HOME"), required=not os.environ.get("ANDROID_NDK_HOME"))
     parser.add_argument("--runtime-lib", type=Path, required=True)

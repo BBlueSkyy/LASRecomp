@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 from gamelib_id import gamelib_id, SOURCES
+from address_layout import CANONICAL_GUEST_BASE, guest_base
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOLS = ROOT / "tools/android"
@@ -21,7 +22,9 @@ class ModuleTests(unittest.TestCase):
         cls.work = Path(cls.temp.name)
         # cpu.h uses Clang vector/bitreverse builtins, just like the real build.
         cls.cc = os.environ.get("CC", "clang")
-        cls.flags = ["-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "runtime"), f'-DGAMELIB_ID="{gamelib_id(ROOT)}"']
+        cls.base = guest_base(os.environ.get("LARECOMP_TEST_GUEST_BASE", CANONICAL_GUEST_BASE))
+        cls.flags = ["-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "runtime"),
+                     f'-DGAMELIB_ID="{gamelib_id(ROOT, cls.base)}"', f'-DLARECOMP_GUEST_BASE={cls.base:#x}ull']
 
         def compile(*args):
             subprocess.run([cls.cc, *cls.flags, *map(str, args)], check=True)
@@ -72,13 +75,13 @@ class ModuleTests(unittest.TestCase):
             destination = copied / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, destination)
-        initial = gamelib_id(copied)
-        self.assertEqual(initial, gamelib_id(ROOT))
+        initial = gamelib_id(copied, self.base)
+        self.assertEqual(initial, gamelib_id(ROOT, self.base))
         for name in SOURCES:
             path = copied / name
             content = path.read_bytes()
             path.write_bytes(content + b"\n")
-            self.assertNotEqual(initial, gamelib_id(copied), name)
+            self.assertNotEqual(initial, gamelib_id(copied, self.base), name)
             path.write_bytes(content)
 
 

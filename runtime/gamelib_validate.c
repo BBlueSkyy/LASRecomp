@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gamelib_validate.h"
+#include "address_layout.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
@@ -49,9 +50,9 @@ bool gamelib_validate_tables(const GameLibTables *t, GameLibRange range, void *c
     if (!t->id || !range(t->id, sizeof GAMELIB_ID, false, context) ||
         memcmp(t->id, GAMELIB_ID, sizeof GAMELIB_ID))
         return invalid(why, size, "game module was built for another runtime version");
-    return table(t->main_addrs, t->main_fns, t->main_count, 0x7000000000ull, 0x7004000000ull,
+    return table(t->main_addrs, t->main_fns, t->main_count, MAIN_BASE, SDK_BASE,
                  range, context, why, size) &&
-           table(t->sdk_addrs, t->sdk_fns, t->sdk_count, 0x7004000000ull, 0x7008000000ull,
+           table(t->sdk_addrs, t->sdk_fns, t->sdk_count, SDK_BASE, SDK_BASE + 0x4000000ull,
                  range, context, why, size);
 }
 
