@@ -59,7 +59,10 @@ with tempfile.TemporaryDirectory(prefix='las-boot-') as tmp:
     (valid / 'sdk').write_bytes(nso(True))
     cases = [('boot and three resets', valid, 'boot', None),
              ('empty compiled SDK table', valid, 'empty-table', None),
-             ('oversized main stack', valid, 'bad-stack', 'invalid main stack')]
+             ('oversized main stack', valid, 'bad-stack', 'invalid main stack'),
+             ('zero main stack', valid, 'zero-stack', 'invalid main stack'),
+             ('fatal from guest thread', valid, 'fatal-guest', 'brk #0'),
+             ('signal from guest thread', valid, 'signal-guest', 'SIGILL accessing')]
     for name, mutate, message in [
         ('short-header', lambda b: b[:4], 'NSO header'),
         ('file-segment', lambda b: patch(b, 0x10, 0xfffffff0), 'segment'),
