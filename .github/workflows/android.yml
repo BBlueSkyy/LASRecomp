@@ -3,10 +3,10 @@ name: Android ARM64 runtime
 on:
   push:
     branches: [port/android-arm64]
-    paths: ['android/**', 'runtime/**', 'tools/android/**', 'tools/android-deps.sh', 'tools/test_android*', 'tools/test_gamelib*', '.github/workflows/android.yml']
+    paths: ['android/**', 'runtime/**', 'tools/**', '.github/workflows/android.yml']
   pull_request:
     types: [opened, reopened]
-    paths: ['android/**', 'runtime/**', 'tools/android/**', 'tools/android-deps.sh', 'tools/test_android*', 'tools/test_gamelib*', '.github/workflows/android.yml']
+    paths: ['android/**', 'runtime/**', 'tools/**', '.github/workflows/android.yml']
   workflow_dispatch:
 
 jobs:
@@ -43,12 +43,23 @@ jobs:
       - name: Build real runtime dependencies
         run: tools/android-deps.sh
       - name: Host regression tests (no game files)
+        env:
+          CC: clang
         run: |
           tools/test_android_prepare.sh
           tools/test_android_platform.sh
           tools/test_android_vulkan_caps.sh
+          python3 tools/test_runtime_boot.py
           python3 tools/android/test_module.py
+          python3 tools/android/test_compilation_cache.py
           android/tests/run.sh
+      - name: Original generator and cached ARM64 module regression (synthetic NSOs)
+        env:
+          CC: clang
+        run: |
+          python3 -m venv /tmp/las-generator-tests
+          /tmp/las-generator-tests/bin/pip install unicorn==2.1.4 capstone==5.0.9 lz4==4.4.5
+          /tmp/las-generator-tests/bin/python tools/android/test_embedded_generation.py
       - name: Build runtime ARM64 APK
         run: gradle -p android :app:assembleDebug --no-daemon --stacktrace
       - name: Verify runtime ELF and absence of game code

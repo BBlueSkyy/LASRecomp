@@ -1,6 +1,6 @@
 # LASRecomp Android ARM64 runtime port
 
-This development APK now links the original runtime. It is **not a self-contained playable port yet**: on-device generation/compilation of the game module is not bundled, and no real game frame has been verified on Android. No Nintendo files or generated game code are included.
+This development APK links the original runtime. It is **not a self-contained playable port yet**. An experimental on-device generator/compiler path is implemented behind a default-off build flag; its Android dependency build and execution have not been verified end to end. No real game frame has been verified on Android. No Nintendo files or generated game code are included.
 
 ## Build
 
@@ -29,9 +29,9 @@ The workflow `.github/workflows/android.yml` builds dependencies, runs host regr
 
 ## Concrete remaining blockers
 
-1. **On-device generation and compilation:** the generator needs Android-hosted Python, Unicorn, Capstone and LZ4; the generated C needs an Android-hosted compiler/linker integrated into the APK. Desktop Python/NDK executables cannot run in an Android app. The host helper is validation infrastructure, not the requested user workflow. No stub reports that this work is done.
+1. **On-device generation and compilation validation:** the opt-in implementation connects embedded CPython, the original generator, Unicorn/Capstone, a Python LZ4 decoder, Clang/LLD C++ callbacks, SHA-256 cache publication and a separate `:prepare` Activity. Dependency build/packaging scripts are checked in. The LLVM archives and compiler bridge have not completed a verified build/link or run on Android; the normal APK therefore keeps this disabled. See [embedded setup](../tools/android/README.md#experimental-on-device-setup).
 2. **Occupied identity address range:** the early reservation can prevent later library collisions, but cannot evict ART/vendor mappings already occupying `0x7000000000..0x7320000000`. A layout that still collides cannot boot. Relocation requires systematic guest-to-host conversion across the generator, CPU memory helpers, loader, HLE and renderer; changing `GUEST_LO` is insufficient.
-3. **Device Vulkan capabilities/custom drivers:** API1.1 is accepted only with equivalent required features/extensions. The Moto G100 proprietary driver has not been proven to meet those requirements. The APK still uses the system loader; custom Turnip/libadrenotools integration is documented but not implemented.
+3. **Device Vulkan capabilities/custom drivers:** API1.1 is accepted only with equivalent required features/extensions. The Moto G100 proprietary driver has not been proven to meet those requirements. A default-off libadrenotools/volk provider and SAF driver import are implemented, but the optional renderer build and driver loading are unverified on Android. No driver binary is distributed. See [renderer contract](../runtime/nvn/vulkan/ANDROID.md).
 4. **Android gameplay validation:** actual guest boot, graphics, audio, controls and pause/resume remain unverified on hardware. Linking code is not evidence that the game runs.
 
 ## Tests and diagnostics
@@ -41,7 +41,13 @@ tools/test_android_platform.sh
 tools/test_android_prepare.sh
 tools/test_android_vulkan_caps.sh
 python3 tools/android/test_module.py
+CC=clang python3 tools/test_runtime_boot.py
+python3 tools/android/test_compilation_cache.py
+# Install pinned host Unicorn/Capstone/LZ4 in a venv before this test.
+CC=clang python3 tools/android/test_embedded_generation.py
 android/tests/run.sh
 ```
 
 These use synthetic fixtures, not game data. The separate diagnostic screen retains the old synthetic Vulkan clear; it is never counted as a game frame. Capability tests and the optional host software-Vulkan smoke test do not validate Android game rendering.
+
+The generator regression executes an original-generator lifted synthetic function on the host. With `ANDROID_NDK_HOME`, it also builds an ARM64 runtime subset from original sources, compiles/links the complete synthetic generated module through the cache coordinator, and verifies that a cache hit skips compilation. This uses the host NDK CLI, not the embedded Clang/LLD bridge, and does not execute the ARM64 output.
