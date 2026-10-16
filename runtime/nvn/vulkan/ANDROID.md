@@ -76,3 +76,19 @@ software driver is sufficient. It does not create an Android window or validate 
 `tests/android_provider_smoke.c` uses volk for all commands and must be compiled with `volk.c` and `-ldl`
 (without `-lvulkan`). It exercises the same capability/device/timeline contract through complete dispatch.
 This host test does not validate libadrenotools namespaces, Android WSI or lifecycle behavior.
+
+`tools/android/test_vulkan_build.py` cross-compiles the renderer, VMA and ImGui Vulkan backend for Android
+ARM64/API28 in both system and optional provider configurations. It needs NDK r27c, the SDL/Vulkan/VMA/shaderc
+headers prepared by the normal dependency setup, and the sources/libraries from `build-driver-deps.sh`.
+The shaderc source checkout's public headers can be used before building the shaderc library.
+
+```sh
+ANDROID_NDK_HOME=/path/to/android-ndk-r27c python3 tools/android/test_vulkan_build.py
+```
+
+The check combines the real renderer objects and rejects unresolved Vulkan symbols in the provider build;
+volk must supply the complete dispatch. It also strictly links the standalone provider with libadrenotools
+and rejects a `libvulkan.so` dependency. Both configurations and the pinned loader dependency build have
+passed this cross-compile check with NDK r27c. This does not link the complete runtime/APK, load an imported
+driver on Android, create a surface, or establish that a Zelda frame has rendered. Those remain device and
+game-data validation steps.

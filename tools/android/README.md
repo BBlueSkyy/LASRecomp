@@ -21,6 +21,35 @@ to compile and link. SDK HLE names come from the existing `hle_symbols.txt`.
 assets are still read by the normal game loader and are not compiled into this
 module. `--out` and `--work-dir` allow a separate artifact and temporary location.
 
+## Import the private module into the APK
+
+The launcher accepts an externally generated private ARM64 module. Build it against
+this APK's `liblasrecomp.so` and matching source/configuration, then copy
+`lasgame.so` and `lasgame.so.id` into one folder accessible to Android's document
+picker. In the launcher, choose **Importar módulo privado ARM64 (pasta)** and
+select that folder. This copies only the module pair into private storage; it
+does not recopy the game's RomFS. Import the extracted `exefs/` and `romfs/`
+separately, then choose **Iniciar runtime com módulo importado**.
+
+Alternatively, place both module files alongside `exefs/` and `romfs/` and use
+the ordinary full game-data import. A separately imported module takes precedence
+over a module included with the game-data tree. Both imports stage complete
+copies before replacing the previous files. Missing sidecars, non-ARM64 ELF
+headers and interrupted provider reads leave the previous import intact.
+
+Import checks the module header and sidecar format. The native runtime still
+checks the actual ELF, imports, ABI fingerprint and function tables before guest
+execution; presence in the launcher does not certify compatibility or gameplay.
+An imported pair starts the runtime directly even in an experimental embedded
+setup build. Without a pair, that build retains the separate preparation process.
+
+The Android guest layout is part of the generated-module contract. Modules from
+an earlier layout or fingerprint must be regenerated for the corresponding APK;
+the current Android builder defaults to the low guest layout beginning at
+`0x1000000000`. A desktop module, or merely editing its `.id`, cannot substitute
+for rebuilding the ARM64 module. No Zelda boot or frame has been verified by the
+synthetic import tests.
+
 `gamelib_id.py` supplies the same fingerprint to Android CMake and this tool. It
 hashes the desktop Makefile's generator/ABI inputs plus the Android compiler/link
 contract. It is intentionally distinct from a desktop-generated module's ID.

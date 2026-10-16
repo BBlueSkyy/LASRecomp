@@ -19,6 +19,7 @@ The workflow `.github/workflows/android.yml` builds dependencies, runs host regr
 ## Actual implemented paths
 
 - SAF imports extracted `exefs/` and `romfs/` recursively into private storage, with staged replacement and rollback. NSO/build-ID checks require the existing v1.0.0 static recompiler input. The URI is never treated as a native path.
+- The launcher separately imports an owner's externally generated `lasgame.so` and `lasgame.so.id` from a selected folder, without recopying RomFS. The full extraction import also accepts the pair beside `exefs/` and `romfs/`. An imported pair bypasses experimental embedded preparation and goes through the production runtime loader; see the [private module workflow](../tools/android/README.md#import-the-private-module-into-the-apk). Modules must be regenerated for the APK's matching guest layout and ABI fingerprint.
 - `GameActivity` runs in `:game`, loads a lightweight memory platform before SDL/heavy runtime, and invokes the original runtime through `SDL_main`.
 - Bionic platform uses actual pthreads, monotonic timing, TLS signal stacks, fault reporting and unwind backtraces. Runtime callbacks are registered before guest threads start.
 - Exact guest reservation safely supports old kernels and reports conflicting VMAs. Reset keeps ownership and discards only owned anonymous pages. No foreign Android mapping is overwritten.
