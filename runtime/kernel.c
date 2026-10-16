@@ -230,6 +230,9 @@ static void thread_start(KThread *t) {
 }
 
 KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio) {
+    // main.npdm is external input; unchecked sizes can place the stack outside
+    // its fixed region or wrap the alignment calculation.
+    if (!stack_size || stack_size > STACK_SIZE) FATAL("invalid main stack size %llx\n", stack_size);
     uint64_t stack = STACK_BASE + STACK_SIZE - ((stack_size + 0xFFFF) & ~0xFFFFull);
     region_add(stack, stack_size, 0xB, 3);
     KThread *t = thread_new(entry, 0, stack + stack_size, prio, 0);
