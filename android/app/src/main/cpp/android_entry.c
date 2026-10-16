@@ -33,9 +33,7 @@ int SDL_main(int argc, char **argv) {
     char why[1024];
     if (!gamelib_load(root, why, sizeof why)) {
         fprintf(stderr, "[android] cannot start guest: %s\n", why);
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp — game code unavailable",
-            "The Android runtime is linked, but on-device static generation and compilation are not bundled yet. "
-            "Importing game files alone cannot boot this build. Details are in lasrecomp.log.", NULL);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp — game module unavailable", why, NULL);
         return 3;
     }
     if (!android_prepare_game(root, why, sizeof why)) {
@@ -44,6 +42,20 @@ int SDL_main(int argc, char **argv) {
         return 4;
     }
     return las_runtime_main(argc, argv);
+}
+
+// SAF copies the owner's module to private storage. Never pass a content URI to dlopen.
+JNIEXPORT void JNICALL
+Java_com_bblueskyy_lasrecomp_GameActivity_configureGameModule(JNIEnv *env, jclass type, jstring path) {
+    (void)type;
+    const char *value = path ? (*env)->GetStringUTFChars(env, path, NULL) : NULL;
+    if (!value) return;
+    int failed = *value ? setenv("LARECOMP_GAME_LIB", value, 1) : unsetenv("LARECOMP_GAME_LIB");
+    (*env)->ReleaseStringUTFChars(env, path, value);
+    if (failed) {
+        jclass error = (*env)->FindClass(env, "java/lang/IllegalStateException");
+        if (error) (*env)->ThrowNew(env, error, "Cannot configure private Android game module");
+    }
 }
 
 // Configure one consistent Vulkan provider before the SDL runtime starts.

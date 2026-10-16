@@ -6,6 +6,11 @@ trap 'rm -rf "$test_classes"' EXIT
 java_sources=(
     "$android_root/app/src/main/java/com/bblueskyy/lasrecomp/GameFiles.java"
     "$android_root/tests/GameFilesTest.java"
+    "$android_root/app/src/main/java/com/bblueskyy/lasrecomp/GameModule.java"
+    "$android_root/tests/GameModuleTest.java"
+    "$android_root/app/src/main/java/com/bblueskyy/lasrecomp/SafImporter.java"
+    "$android_root/tests/SafImporterTest.java"
+    "$android_root"/tests/stubs/android/{content,database,net,provider,os}/*.java
     "$android_root/app/src/main/java/com/bblueskyy/lasrecomp/EmbeddedAssets.java"
     "$android_root/tests/EmbeddedAssetsTest.java"
 )
@@ -17,3 +22,7 @@ fi
 java -cp "$test_classes" com.bblueskyy.lasrecomp.GameFilesTest
 
 java -cp "$test_classes" com.bblueskyy.lasrecomp.EmbeddedAssetsTest
+
+java -cp "$test_classes" com.bblueskyy.lasrecomp.GameModuleTest
+
+java -cp "$test_classes" com.bblueskyy.lasrecomp.SafImporterTest

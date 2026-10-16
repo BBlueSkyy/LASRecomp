@@ -29,6 +29,10 @@ final class GameFiles {
             throw new IOException("São necessários exefs/main, exefs/sdk e a pasta romfs/.");
         validateNso(new File(incoming, "exefs/main"), true);
         validateNso(new File(incoming, "exefs/sdk"), false);
+        GameModule.validateOptional(incoming);
+        File module = new File(incoming, "lasgame.so");
+        if (module.exists() && !module.setReadOnly())
+            throw new IOException("Não foi possível proteger o módulo importado contra escrita.");
         File backup = new File(live.getParentFile(), "extracted.previous");
         if (backup.exists()) delete(backup);
         boolean hadLive = live.exists();

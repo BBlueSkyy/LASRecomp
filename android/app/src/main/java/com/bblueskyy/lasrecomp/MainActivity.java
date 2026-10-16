@@ -20,13 +20,13 @@ import java.util.concurrent.Executors;
 
 /** Android launcher and legal game-file import. The runtime has its own process. */
 public final class MainActivity extends Activity {
-    private static final int REQUEST_TREE = 42, REQUEST_DRIVER = 43;
+    private static final int REQUEST_TREE = 42, REQUEST_DRIVER = 43, REQUEST_MODULE = 44;
     private static final ExecutorService IMPORTS = Executors.newSingleThreadExecutor();
     private static volatile boolean importing;
     private static volatile String importMessage = "";
     private static volatile WeakReference<MainActivity> active = new WeakReference<>(null);
     private TextView status;
-    private Button select, play, log;
+    private Button select, module, play, log;
 
     // Existing diagnostic JNI entry points; launcher does not load runtime libraries.
     static native String probeHost();
@@ -49,8 +49,9 @@ public final class MainActivity extends Activity {
         help.setText("Importe uma cópia legal extraída de Link's Awakening v1.0.0. "
                 + "Selecione a pasta que contém exefs/ e romfs/. Os arquivos serão copiados "
                 + "para este aplicativo; reserve espaço livre para todos os dados.\n\n"
-                + "Port experimental: a geração ARM64 dentro do aplicativo ainda está incompleta. "
-                + "Importar os arquivos, sozinho, ainda não permite jogar nesta versão.");
+                + "Para testar o runtime, importe também seu módulo privado lasgame.so e "
+                + "lasgame.so.id, gerados para este APK com o compilador ARM64 externo. "
+                + "A geração dentro do aplicativo continua experimental.");
         help.setTextColor(Color.LTGRAY);
         help.setPadding(0, pad, 0, pad);
         root.addView(help);
@@ -62,6 +63,14 @@ public final class MainActivity extends Activity {
             startActivityForResult(intent, REQUEST_TREE);
         });
         root.addView(select);
+        module = new Button(this);
+        module.setText("Importar módulo privado ARM64 (pasta)");
+        module.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivityForResult(intent, REQUEST_MODULE);
+        });
+        root.addView(module);
         play = new Button(this);
         play.setText("Tentar iniciar o runtime");
         play.setOnClickListener(v -> {
@@ -71,7 +80,7 @@ public final class MainActivity extends Activity {
                 DriverImporter.addSelection(this, runtime);
                 runtime.putExtra("configure_driver", true);
             }
-            if (BuildConfig.EMBEDDED_SETUP) PreparationActivity.start(this, runtime);
+            if (BuildConfig.EMBEDDED_SETUP && !hasModule()) PreparationActivity.start(this, runtime);
             else startActivity(runtime);
         });
         root.addView(play);
@@ -111,10 +120,16 @@ public final class MainActivity extends Activity {
         setContentView(page);
         File previous = new File(getFilesDir(), "extracted.previous");
         if (!gameRoot().exists() && GameFiles.isReady(previous)) previous.renameTo(gameRoot());
+        File modulePrevious = new File(getFilesDir(), "module.previous");
+        File moduleRoot = new File(getFilesDir(), "module");
+        if (!moduleRoot.exists() && GameModule.isPresent(modulePrevious)) modulePrevious.renameTo(moduleRoot);
         refresh();
     }
 
     private File gameRoot() { return new File(getFilesDir(), "extracted"); }
+    private boolean hasModule() {
+        return GameModule.isPresent(new File(getFilesDir(), "module")) || GameModule.isPresent(gameRoot());
+    }
 
     @Override protected void onResume() {
         super.onResume();
@@ -126,10 +141,15 @@ public final class MainActivity extends Activity {
         if (status == null) return;
         boolean ready = GameFiles.isReady(gameRoot());
         select.setEnabled(!importing);
-        play.setEnabled(ready && !importing);
+        module.setEnabled(!importing);
+        play.setEnabled(ready && !importing && (hasModule() || BuildConfig.EMBEDDED_SETUP));
+        play.setText(hasModule() ? "Iniciar runtime com módulo importado"
+                : BuildConfig.EMBEDDED_SETUP ? "Preparar e iniciar (experimental)" : "Importe um módulo ARM64 para iniciar");
         log.setEnabled(new File(getFilesDir(), "lasrecomp.log").isFile());
         status.setText(importMessage + (importMessage.isEmpty() ? "" : "\n\n")
-                + (ready ? "Arquivos importados. Pronto para tentar iniciar o runtime."
+                + (ready ? "Arquivos do jogo importados. " + (hasModule()
+                            ? "Módulo presente; o runtime verificará ELF, versão e tabelas antes de executar."
+                            : "Importe lasgame.so e lasgame.so.id para este APK.")
                          : "Nenhuma importação completa. São necessários exefs/main, exefs/sdk e romfs/."));
     }
 
@@ -171,7 +191,7 @@ public final class MainActivity extends Activity {
             });
             return;
         }
-        if (request != REQUEST_TREE || result != RESULT_OK || intent == null
+        if ((request != REQUEST_TREE && request != REQUEST_MODULE) || result != RESULT_OK || intent == null
                 || intent.getData() == null || importing) return;
         Uri tree = intent.getData();
         importing = true;
@@ -179,10 +199,13 @@ public final class MainActivity extends Activity {
         android.content.Context app = getApplicationContext();
         IMPORTS.execute(() -> {
             try {
-                new SafImporter(app.getContentResolver(), (files, bytes) -> update(String.format(
+                SafImporter importer = new SafImporter(app.getContentResolver(), (files, bytes) -> update(String.format(
                         Locale.getDefault(), "Importando: %d arquivos • %.1f MiB", files,
-                        bytes / (1024.0 * 1024.0)))).importTree(tree, app.getFilesDir());
-                update("Importação concluída.");
+                        bytes / (1024.0 * 1024.0))));
+                if (request == REQUEST_MODULE) importer.importModuleTree(tree, app.getFilesDir());
+                else importer.importTree(tree, app.getFilesDir());
+                update(request == REQUEST_MODULE ? "Módulo importado; a compatibilidade será verificada ao iniciar."
+                        : "Importação concluída.");
             } catch (Exception e) {
                 update("Importação falhou: " + e.getMessage());
             } finally {
