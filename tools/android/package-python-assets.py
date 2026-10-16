@@ -26,8 +26,8 @@ def package(root):
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.so', 'test', 'tests', 'idlelib', 'tkinter', 'ensurepip', 'turtledemo'))
     for filename in (cpython / 'lib').glob('*.so'):
         # Preserve licenses for packaged libraries; exclude unneeded SSL/sqlite libs.
-        if filename.name in ('libpython3.14.so', 'libpython3.so'):
-            shutil.copyfile(filename, lib / filename.name)
+        # Preserve dependency closure of the packaged stdlib extensions, including libffi.
+        shutil.copyfile(filename, lib / filename.name)
     # Required stdlib extensions only: dependency closure of the actual generator
     # plus common encodings/hash algorithms. All load from nativeLibraryDir.
     extensions = ('_struct', '_ctypes', 'math', 'binascii', 'zlib', '_bz2', '_lzma', '_opcode',
@@ -42,7 +42,10 @@ def package(root):
     for filename in (root / 'tools').glob('*.py'):
         if not filename.name.startswith('test_'):
             shutil.copyfile(filename, tools / filename.name)
-    shutil.copyfile(root / 'tools/android/embedded_generate.py', tools / 'embedded_generate.py')
+    for name in ('embedded_generate.py', 'compilation_cache.py'):
+        shutil.copyfile(root / 'tools/android' / name, tools / name)
+    (tools / 'rando').mkdir()
+    shutil.copyfile(root / 'tools/rando/patch_variants.json', tools / 'rando/patch_variants.json')
     shutil.copyfile(root / 'runtime/hle/hle_symbols.txt', tools / 'hle_symbols.txt')
     for name, version in (('unicorn', '2.1.4'), ('capstone', '5.0.9')):
         shutil.copytree(src / f'{name}-{version}' / name, tools / name,
