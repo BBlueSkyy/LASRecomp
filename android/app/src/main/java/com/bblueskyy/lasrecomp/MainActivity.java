@@ -4,9 +4,12 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -26,7 +29,7 @@ public final class MainActivity extends Activity {
     private static volatile String importMessage = "";
     private static volatile WeakReference<MainActivity> active = new WeakReference<>(null);
     private TextView status;
-    private Button select, module, play, log;
+    private Button select, module, play, log, frame;
 
     // Existing diagnostic JNI entry points; launcher does not load runtime libraries.
     static native String probeHost();
@@ -109,6 +112,10 @@ public final class MainActivity extends Activity {
         log.setText("Ver log da última inicialização");
         log.setOnClickListener(v -> showRuntimeLog());
         root.addView(log);
+        frame = new Button(this);
+        frame.setText("Ver primeira imagem do jogo (captura privada)");
+        frame.setOnClickListener(v -> showFirstFrame());
+        root.addView(frame);
         status = new TextView(this);
         status.setTextColor(Color.WHITE);
         status.setTextIsSelectable(true);
@@ -146,11 +153,43 @@ public final class MainActivity extends Activity {
         play.setText(hasModule() ? "Iniciar runtime com módulo importado"
                 : BuildConfig.EMBEDDED_SETUP ? "Preparar e iniciar (experimental)" : "Importe um módulo ARM64 para iniciar");
         log.setEnabled(new File(getFilesDir(), "lasrecomp.log").isFile());
+        frame.setEnabled(new File(getFilesDir(), "first_guest_frame.png").isFile());
         status.setText(importMessage + (importMessage.isEmpty() ? "" : "\n\n")
                 + (ready ? "Arquivos do jogo importados. " + (hasModule()
                             ? "Módulo presente; o runtime verificará ELF, versão e tabelas antes de executar."
                             : "Importe lasgame.so e lasgame.so.id para este APK.")
                          : "Nenhuma importação completa. São necessários exefs/main, exefs/sdk e romfs/."));
+    }
+
+    private void showFirstFrame() {
+        File path = new File(getFilesDir(), "first_guest_frame.png");
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(path.getAbsolutePath(), options);
+        if (options.outWidth <= 0 || options.outHeight <= 0) {
+            new AlertDialog.Builder(this).setMessage("A captura não pôde ser lida. Consulte o log do runtime.")
+                    .setPositiveButton("Fechar", null).show();
+            return;
+        }
+        options.inJustDecodeBounds = false;
+        options.inSampleSize = 1;
+        while (options.outWidth / options.inSampleSize > 1600 || options.outHeight / options.inSampleSize > 1200)
+            options.inSampleSize *= 2;
+        Bitmap screenshot = BitmapFactory.decodeFile(path.getAbsolutePath(), options);
+        if (screenshot == null) {
+            new AlertDialog.Builder(this).setMessage("Falha ao decodificar a captura.")
+                    .setPositiveButton("Fechar", null).show();
+            return;
+        }
+        ImageView view = new ImageView(this);
+        view.setImageBitmap(screenshot);
+        view.setAdjustViewBounds(true);
+        view.setPadding(12, 12, 12, 12);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(view);
+        new AlertDialog.Builder(this).setTitle("Primeira captura NVN do jogo")
+                .setMessage("Imagem privada do renderizador. Pode estar preta ou incorreta; só a inspeção confirma o conteúdo.")
+                .setView(scroll).setPositiveButton("Fechar", null).show();
     }
 
     private void showRuntimeLog() {
