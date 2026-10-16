@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from compilation_cache import build_cached, cache_ready
 from gamelib_id import COMPILE_FLAGS, LINK_FLAGS, gamelib_id
 from address_layout import ANDROID_GUEST_BASE
@@ -121,6 +122,16 @@ class EmbeddedGeneratorTests(unittest.TestCase):
                     build_cached(game, ROOT / 'tools', identity, compile_one, link)
                     self.assertEqual(len(compiled), count, 'cache hit must skip generation and compilation')
                     self.assertFalse(list(game.glob('.las-build-*')))
+                    apk = stage / 'public-runtime-fixture.apk'
+                    with zipfile.ZipFile(apk, 'w') as archive:
+                        archive.write(runtime, 'lib/arm64-v8a/liblasrecomp.so')
+                    external = stage / 'external/lasgame.so'
+                    subprocess.run([sys.executable, str(ROOT / 'tools/android/build_module.py'),
+                                    '--apk', str(apk), '--ndk', str(ndk), '--game-dir', str(game),
+                                    '--out', str(external)], check=True, capture_output=True, text=True)
+                    self.assertEqual(external.with_name('lasgame.so.id').read_text().strip(), identity)
+                    from compilation_cache import android_module
+                    self.assertTrue(android_module(external))
                 finally:
                     sys.path.pop(0)
                     if previous is None:

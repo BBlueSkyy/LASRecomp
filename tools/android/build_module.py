@@ -14,6 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 from gamelib_id import COMPILE_FLAGS, LINK_FLAGS, gamelib_id
 from address_layout import ANDROID_GUEST_BASE, SDK_OFFSET, guest_base
@@ -42,6 +43,20 @@ def validate_elf(path: Path) -> None:
         raise ValueError("compiler did not produce a little-endian ELF64 module")
     if struct.unpack_from("<HH", header, 16) != (3, 183):
         raise ValueError("compiler did not produce an AArch64 ET_DYN shared library")
+
+
+def runtime_from_apk(apk: Path, directory: Path) -> Path:
+    """Read only the installed runtime ABI; never import game code from an APK."""
+    name = 'lib/arm64-v8a/liblasrecomp.so'
+    with zipfile.ZipFile(apk) as archive:
+        entries = [entry for entry in archive.infolist() if entry.filename == name]
+        if len(entries) != 1 or entries[0].is_dir() or not 64 <= entries[0].file_size <= 512 * 1024 * 1024:
+            raise ValueError('APK must contain exactly one ARM64 liblasrecomp.so (up to 512 MiB)')
+        library = directory / 'liblasrecomp.so'
+        with archive.open(entries[0]) as source, library.open('wb') as output:
+            shutil.copyfileobj(source, output, length=1024 * 1024)
+    validate_elf(library)
+    return library
 
 
 def build(args: argparse.Namespace) -> Path:
@@ -114,7 +129,9 @@ def main() -> None:
                         help="identity-address layout; must match the APK CMake LARECOMP_GUEST_BASE")
     parser.add_argument("--game-dir", type=Path, required=True)
     parser.add_argument("--ndk", type=Path, default=os.environ.get("ANDROID_NDK_HOME"), required=not os.environ.get("ANDROID_NDK_HOME"))
-    parser.add_argument("--runtime-lib", type=Path, required=True)
+    runtime = parser.add_mutually_exclusive_group(required=True)
+    runtime.add_argument("--runtime-lib", type=Path, help="installed ARM64 liblasrecomp.so from this APK build")
+    runtime.add_argument("--apk", type=Path, help="use the real runtime library inside this Android APK")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--work-dir", type=Path, help="existing directory for temporary generated C and objects")
     parser.add_argument("--api", type=int, default=28)
@@ -123,8 +140,13 @@ def main() -> None:
     if args.api < 28 or args.jobs < 1 or args.jobs > 64:
         parser.error("--api must be >=28 and --jobs must be between 1 and 64")
     try:
-        print(build(args))
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        if args.apk:
+            with tempfile.TemporaryDirectory(prefix='las-apk-runtime-') as temporary:
+                args.runtime_lib = runtime_from_apk(args.apk, Path(temporary))
+                print(build(args))
+        else:
+            print(build(args))
+    except (OSError, ValueError, zipfile.BadZipFile, subprocess.CalledProcessError) as error:
         parser.exit(1, f"module build failed: {error}\n")
 
 

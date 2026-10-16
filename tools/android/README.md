@@ -9,7 +9,7 @@ included here.
 python3 -m pip install unicorn capstone lz4
 python3 tools/android/build_module.py \
   --ndk "$ANDROID_NDK_HOME" \
-  --runtime-lib /path/to/apk-build/arm64-v8a/liblasrecomp.so \
+  --apk /path/to/LASRecomp.apk \
   --game-dir /path/to/legally-extracted-game
 ```
 
@@ -20,6 +20,12 @@ to compile and link. SDK HLE names come from the existing `hle_symbols.txt`.
 `liblasrecomp.so`. The output is `lasgame.so` and a matching `.id` sidecar. RomFS
 assets are still read by the normal game loader and are not compiled into this
 module. `--out` and `--work-dir` allow a separate artifact and temporary location.
+`--apk` extracts only the ARM64 runtime library into temporary host storage;
+manual library extraction is unnecessary. `--runtime-lib` remains supported.
+Use the same source commit as the APK. The default guest base matches the normal
+Android build; a custom `-PguestBase=0x...` APK requires matching `--guest-base`.
+The generated module and sidecar are private outputs: do not upload them to public
+Actions artifacts or commit them.
 
 ## Import the private module into the APK
 
