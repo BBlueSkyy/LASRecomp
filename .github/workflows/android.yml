@@ -1,0 +1,93 @@
+name: Android ARM64 runtime
+
+on:
+  push:
+    branches: [port/android-arm64]
+    paths: ['android/**', 'runtime/**', 'tools/**', '.github/workflows/android.yml']
+  pull_request:
+    types: [opened, reopened]
+    paths: ['android/**', 'runtime/**', 'tools/**', '.github/workflows/android.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK packages
+        run: |
+          SDKROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(find "$SDKROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          test -n "$SDKMANAGER"
+          echo "ANDROID_HOME=$SDKROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDKROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDKROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+      # Validate checked-in Gradle wrappers before extracting SDL sources,
+      # whose bundled third-party wrapper is not used for this Android build.
+      # Wrapper validation stays enabled for our repository.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - uses: actions/cache@v4
+        with:
+          path: android/deps
+          key: android-arm64-r27c-deps-${{ hashFiles('tools/android-deps.sh') }}
+      - name: Build real runtime dependencies
+        run: tools/android-deps.sh
+      - name: Host regression tests (no game files)
+        env:
+          CC: clang
+        run: |
+          tools/test_android_prepare.sh
+          tools/test_android_platform.sh
+          tools/test_android_vulkan_caps.sh
+          python3 tools/test_runtime_boot.py
+          python3 tools/test_runtime_boot.py --guest-base 0x1000000000
+          python3 tools/android/test_module.py
+          LARECOMP_TEST_GUEST_BASE=0x1000000000 python3 tools/android/test_module.py
+          python3 tools/android/test_runtime_contract.py
+          python3 tools/android/test_compilation_cache.py
+          android/tests/run.sh
+      - name: Original generator and cached ARM64 module regression (synthetic NSOs)
+        env:
+          CC: clang
+        run: |
+          python3 -m venv /tmp/las-generator-tests
+          /tmp/las-generator-tests/bin/pip install unicorn==2.1.4 capstone==5.0.9 lz4==4.4.5
+          /tmp/las-generator-tests/bin/python tools/android/test_embedded_generation.py
+          /tmp/las-generator-tests/bin/python tools/test_guest_layout.py
+      - name: Build runtime ARM64 APK
+        run: gradle -p android :app:assembleDebug --no-daemon --stacktrace
+      - name: Verify runtime ELF and absence of game code
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          unzip -p "$APK" lib/arm64-v8a/liblasrecomp.so > /tmp/liblasrecomp.so
+          NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          "$NM" -D /tmp/liblasrecomp.so | grep -E ' T SDL_main$'
+          "$NM" -D /tmp/liblasrecomp.so | grep -E ' D __start_hle_impls$'
+          "$NM" -D /tmp/liblasrecomp.so | grep -E ' D __start_services$'
+          "$NM" -D /tmp/liblasrecomp.so | grep -E ' D __start_resets$'
+          "$NM" -D /tmp/liblasrecomp.so | grep -E ' [RD] lasrecomp_build_contract_v1$'
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, 'tools/android')
+          from build_module import match_runtime
+          match_runtime(Path('/tmp/liblasrecomp.so'), Path.cwd())
+          PY
+          if "$NM" -D /tmp/liblasrecomp.so | grep -qE ' T f_70'; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LASRecomp-Android-arm64-runtime-dev
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/deps/arm64-v8a/lib/pkgconfig/*.pc
+          if-no-files-found: error

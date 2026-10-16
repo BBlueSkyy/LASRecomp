@@ -110,7 +110,8 @@ endif
 # flags). A library with another id is rebuilt by the start screen, never loaded.
 GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py \
                 tools/simd_c.py tools/rando/patch_variants.json tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
-                runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h
+                runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h \
+                tools/address_layout.py runtime/address_layout.h runtime/gamelib_contract.h
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
@@ -126,8 +127,8 @@ $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h
 $(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -c $< -o $@
-$(B)/rt/gamelib.o: $(GAMELIB_SRCS)
-$(B)/rt/gamelib.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"'
+$(B)/rt/gamelib.o $(B)/rt/gamelib_validate.o $(B)/rt/gamelib_contract.o: $(GAMELIB_SRCS)
+$(B)/rt/gamelib.o $(B)/rt/gamelib_validate.o $(B)/rt/gamelib_contract.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"'
 # the start screen's build of it (runtime/gamebuild.c) uses the same flags
 $(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile
 $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_CFLAGS='"$(strip $(filter-out -Iruntime,$(GENFLAGS)))"' \

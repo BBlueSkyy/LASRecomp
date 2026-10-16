@@ -12,7 +12,10 @@ import re
 import struct
 import sys
 import time
+from types import SimpleNamespace
 from collections import Counter
+
+from address_layout import CANONICAL_GUEST_BASE, SDK_OFFSET
 
 import unicorn as uc
 from unicorn import arm64_const as A
@@ -352,6 +355,33 @@ class Module:
             return ['return;']
         raise Unsupported(k)
 
+    def patch_at(self, address):
+        """Apply canonical patch definitions at this module's selected load base.
+
+        Patch callbacks inspect original NSO offsets and return trusted C with
+        canonical guest address tokens. Rebase that limited output, never normal
+        lifted integer immediates, which need not represent pointers.
+        """
+        canonical_base = {'main': CANONICAL_GUEST_BASE,
+                          'sdk': CANONICAL_GUEST_BASE + SDK_OFFSET}.get(self.name, self.base)
+        delta = self.base - canonical_base
+        canonical = address - delta
+        callback = PATCHES.get(canonical)
+        if callback is None:
+            return None
+        code = callback(SimpleNamespace(base=canonical_base, nso=self.nso), canonical)
+        if not delta:
+            return code
+
+        def rebase(match):
+            prefix, digits = match.group(1), match.group(2)
+            value = int(digits, 16)
+            if CANONICAL_GUEST_BASE <= value < CANONICAL_GUEST_BASE + 0x320000000:
+                return prefix + format(value + delta, 'x')
+            return match.group(0)
+
+        return re.sub(r'\b(0x|f_|L_)([0-9a-fA-F]+)', rebase, code)
+
     def emit_function(self, entry, end, labels, tables, hle):
         out = [f'void {fname(entry)}(Cpu *c) {{']
         if entry in hle:
@@ -405,9 +435,10 @@ class Module:
                 out.append('    else { ' + ' '.join(self.render_single(ins, a, jump, refs)) + ' } }')
                 last = 'op'
                 continue
-            if a in PATCHES:  # hand-written replacement for one instruction (tools/patches.py)
+            patch = self.patch_at(a)
+            if patch is not None:  # hand-written replacement for one instruction (tools/patches.py)
                 flush()
-                out.append('    ' + PATCHES[a](self, a))
+                out.append('    ' + patch)
                 last = 'op'
                 continue
             k = ins.kind

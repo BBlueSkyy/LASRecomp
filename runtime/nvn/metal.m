@@ -586,7 +586,7 @@ void backend_init(void) {
     if (!g_guest_buffer) FATAL("cannot wrap guest heap in a Metal buffer (max %llu)\n", (uint64_t)dev.maxBufferLength);
     renderer_init(dev);
     if (getenv("LARECOMP_ASPECT_TEST")) {  // experiment: widen the game's 16:9 aspect constant
-        float *k = (float *)(uintptr_t)0x70016afba4ull;
+        float *k = (float *)(uintptr_t)(MAIN_BASE + 0x16afba4ull);
         mprotect((void *)((uintptr_t)k & ~0x3fffull), 0x4000, PROT_READ | PROT_WRITE);
         LOG("[aspect] constant %f -> %f\n", *k, (float)atof(getenv("LARECOMP_ASPECT_TEST")));
         *k = (float)atof(getenv("LARECOMP_ASPECT_TEST"));

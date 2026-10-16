@@ -7,7 +7,7 @@
 Module g_modules[4];
 int g_nmodules;
 
-enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8,
+enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8, DT_STRSZ = 10,
        DT_JMPREL = 23, DT_INIT_ARRAY = 25, DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27, DT_FINI_ARRAYSZ = 28 };
 enum { R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027 };
 
@@ -20,18 +20,19 @@ static size_t lz4_decompress(const uint8_t *src, size_t srclen, uint8_t *dst, si
     while (s < se) {
         uint8_t tok = *s++;
         size_t lit = tok >> 4;
-        if (lit == 15) { uint8_t b; do { b = *s++; lit += b; } while (b == 255); }
-        if (d + lit > de || s + lit > se) break;
+        if (lit == 15) { uint8_t b; do { if (s == se) return SIZE_MAX; b = *s++; lit += b; } while (b == 255); }
+        if (lit > (size_t)(de - d) || lit > (size_t)(se - s)) return SIZE_MAX;
         memcpy(d, s, lit);
         d += lit; s += lit;
         if (s >= se) break;
+        if (se - s < 2) return SIZE_MAX;
         size_t off = s[0] | (s[1] << 8);
         s += 2;
         size_t ml = tok & 15;
-        if (ml == 15) { uint8_t b; do { b = *s++; ml += b; } while (b == 255); }
+        if (ml == 15) { uint8_t b; do { if (s == se) return SIZE_MAX; b = *s++; ml += b; } while (b == 255); }
         ml += 4;
+        if (!off || off > (size_t)(d - dst) || ml > (size_t)(de - d)) return SIZE_MAX;
         uint8_t *m = d - off;
-        if (m < dst || d + ml > de) break;
         while (ml--) *d++ = *m++;
     }
     return d - dst;
@@ -40,24 +41,43 @@ static size_t lz4_decompress(const uint8_t *src, size_t srclen, uint8_t *dst, si
 static uint8_t *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    *len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint8_t *p = malloc(*len);
-    fread(p, 1, *len, f);
+    if (fseek(f, 0, SEEK_END)) { fclose(f); return NULL; }
+    long end = ftell(f);
+    if (end < 0 || fseek(f, 0, SEEK_SET)) { fclose(f); return NULL; }
+    *len = (size_t)end;
+    uint8_t *p = malloc(*len ? *len : 1);
+    if (!p || fread(p, 1, *len, f) != *len) { free(p); fclose(f); return NULL; }
     fclose(f);
     return p;
 }
 
-static void load_nso(Module *m, const char *path, uint64_t base) {
+static bool module_range(const Module *m, uint64_t offset, uint64_t size) {
+    return offset <= m->size && size <= m->size - offset;
+}
+
+static void require_range(const Module *m, uint64_t offset, uint64_t size, const char *what) {
+    if (!module_range(m, offset, size)) FATAL("%s: %s outside module image\n", m->name, what);
+}
+
+static void load_nso(Module *m, const char *path, uint64_t base, uint64_t limit) {
     size_t len;
     uint8_t *raw = read_file(path, &len);
-    if (!raw || memcmp(raw, "NSO0", 4)) FATAL("cannot load %s\n", path);
+    if (!raw) FATAL("cannot load %s\n", path);
+    if (len < 0x100 || memcmp(raw, "NSO0", 4)) FATAL("invalid NSO header: %s\n", path);
     uint32_t flags = *(uint32_t *)(raw + 0xC);
     uint32_t seg[3][3];  // file_off, mem_off, size
     for (int i = 0; i < 3; i++) memcpy(seg[i], raw + 0x10 + i * 0x10, 12);
     uint32_t bss = *(uint32_t *)(raw + 0x3C);
-    uint64_t size = (seg[2][1] + seg[2][2] + bss + 0x3FFF) & ~0x3FFFull;
+    uint64_t end = (uint64_t)seg[2][1] + seg[2][2] + bss;
+    uint64_t size = (end + 0x3FFF) & ~0x3FFFull;
+    if (!size || base >= limit || size > limit - base) FATAL("%s: module exceeds fixed address slot\n", path);
+    // kernel_init and generated module tables require ordered, disjoint segments.
+    for (int i = 0; i < 3; i++) {
+        uint64_t mem_end = (uint64_t)seg[i][1] + seg[i][2];
+        uint64_t stored = flags & (1u << i) ? *(uint32_t *)(raw + 0x60 + i * 4) : seg[i][2];
+        if (mem_end > end || (i < 2 && mem_end > seg[i + 1][1]) ||
+            seg[i][0] > len || stored > len - seg[i][0]) FATAL("%s: invalid segment %d\n", path, i);
+    }
     plat_commit(base, size);  // inside the guest window: zero-filled, read/write
     for (int i = 0; i < 3; i++) {
         uint32_t csize = *(uint32_t *)(raw + 0x60 + i * 4);
@@ -76,20 +96,41 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
     m->ro_off = seg[1][1];   m->ro_size = seg[1][2];
     m->data_off = seg[2][1]; m->data_size = seg[2][2] + bss;
 
+    require_range(m, 0, 8, "MOD0 pointer");
     uint32_t mod0 = *(uint32_t *)(base + 4);
+    require_range(m, mod0, 28, "MOD0");
     uint64_t mod = base + mod0;
-    m->dynamic = mod + *(int32_t *)(mod + 4);
+    if (memcmp((void *)mod, "MOD0", 4)) FATAL("%s: invalid MOD0 magic\n", path);
+    int64_t dynamic_off = (int64_t)mod0 + *(int32_t *)(mod + 4);
+    if (dynamic_off < 0) FATAL("%s: invalid dynamic offset\n", path);
+    require_range(m, (uint64_t)dynamic_off, 16, "dynamic");
+    m->dynamic = base + (uint64_t)dynamic_off;
+    uint64_t strsz = 0;
     for (uint64_t *d = (uint64_t *)m->dynamic; d[0] != DT_NULL; d += 2) {
+        require_range(m, (uint64_t)d - base, 32, "dynamic terminator");
         switch (d[0]) {
-        case DT_SYMTAB: m->symtab = base + d[1]; break;
-        case DT_STRTAB: m->strtab = base + d[1]; break;
-        case DT_HASH: m->nsyms = *(uint32_t *)(base + d[1] + 4); break;
+        case DT_SYMTAB: require_range(m, d[1], 0, "symbol table"); m->symtab = base + d[1]; break;
+        case DT_STRTAB: require_range(m, d[1], 0, "string table"); m->strtab = base + d[1]; break;
+        case DT_STRSZ: strsz = d[1]; break;
+        case DT_HASH: require_range(m, d[1], 8, "symbol hash"); m->nsyms = *(uint32_t *)(base + d[1] + 4); break;
         case 12: m->init = base + d[1]; break;  // DT_INIT
         case 13: m->fini = base + d[1]; break;  // DT_FINI
         case DT_INIT_ARRAY: m->init_array = base + d[1]; break;
         case DT_INIT_ARRAYSZ: m->init_array_sz = d[1]; break;
         case DT_FINI_ARRAY: m->fini_array = base + d[1]; break;
         case DT_FINI_ARRAYSZ: m->fini_array_sz = d[1]; break;
+        }
+    }
+    if (m->nsyms) {
+        if (!m->symtab || !m->strtab || m->nsyms > m->size / sizeof(Elf64Sym))
+            FATAL("%s: invalid symbol table\n", path);
+        require_range(m, m->symtab - base, m->nsyms * sizeof(Elf64Sym), "symbol table");
+        uint64_t available = m->size - (m->strtab - base);
+        if (strsz) { require_range(m, m->strtab - base, strsz, "string table"); available = strsz; }
+        for (uint64_t i = 0; i < m->nsyms; ++i) {
+            Elf64Sym *s = (Elf64Sym *)m->symtab + i;
+            if (s->name >= available || !memchr((void *)(m->strtab + s->name), 0, available - s->name))
+                FATAL("%s: invalid symbol name\n", path);
         }
     }
     LOG("loaded %-5s at %llx size %llx syms %llu\n", m->name, base, size, m->nsyms);
@@ -129,6 +170,7 @@ const char *loader_symbol_at(uint64_t addr, uint64_t *offset) {
 }
 
 static uint64_t resolve(Module *m, uint32_t symidx) {
+    if (symidx >= m->nsyms) FATAL("%s: relocation symbol index out of range\n", m->name);
     Elf64Sym *s = sym(m, symidx);
     const char *name = symname(m, s);
     if (s->shndx) return m->base + s->value;
@@ -151,8 +193,12 @@ static void relocate(Module *m) {
     int unresolved = 0;
     for (int pass = 0; pass < 2; pass++) {
         Elf64Rela *r = (Elf64Rela *)(pass ? jmprel : rela);
-        uint64_t n = (pass ? pltsz : relasz) / sizeof(Elf64Rela);
+        uint64_t bytes = pass ? pltsz : relasz;
+        if (bytes && (!r || bytes % sizeof(Elf64Rela))) FATAL("%s: invalid relocation table\n", m->name);
+        if (bytes) require_range(m, (uint64_t)r - m->base, bytes, "relocation table");
+        uint64_t n = bytes / sizeof(Elf64Rela);
         for (uint64_t i = 0; i < n; i++) {
+            require_range(m, r[i].off, 8, "relocation target");
             uint64_t *where = (uint64_t *)(m->base + r[i].off);
             uint32_t type = (uint32_t)r[i].info, si = r[i].info >> 32;
             switch (type) {
@@ -175,11 +221,13 @@ static void relocate(Module *m) {
 void loader_load(const char *exefs) {
     char path[1024];
     static const struct { const char *name; uint64_t base; } mods[] = {{"main", MAIN_BASE}, {"sdk", SDK_BASE}};
+    g_nmodules = 0;
+    memset(g_modules, 0, sizeof g_modules);
     for (unsigned i = 0; i < 2; i++) {
         Module *m = &g_modules[g_nmodules++];
         m->name = mods[i].name;
         snprintf(path, sizeof path, "%s/%s", exefs, m->name);
-        load_nso(m, path, mods[i].base);
+        load_nso(m, path, mods[i].base, i == 0 ? SDK_BASE : HLE_BASE);
     }
     for (int i = 0; i < g_nmodules; i++) relocate(&g_modules[i]);
 }

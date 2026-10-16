@@ -17,3 +17,9 @@ tools/venv/
 venv/
 __pycache__/
 .DS_Store
+# Android dependency sources and local cross builds
+/android/deps/
+/android/.gradle/
+/android/local.properties
+/android/app/.cxx/
+/android/app/build/

@@ -11,8 +11,14 @@ extern "C" {
 // in-place reboot while the menu's context lives on): the backend keeps its data in the current context.
 extern "C" bool vk_imgui_backend_init(void) {
     if (ImGui::GetIO().BackendRendererUserData) return true;
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    if (!ImGui_ImplVulkan_LoadFunctions(g_vk.api_version, [](const char *name, void *) -> PFN_vkVoidFunction {
+        PFN_vkVoidFunction f = vkGetDeviceProcAddr(g_vk.dev, name);
+        return f ? f : vkGetInstanceProcAddr(g_vk.inst, name);
+    })) { LOG("[vk] ImGui provider dispatch unavailable\n"); return false; }
+#endif
     ImGui_ImplVulkan_InitInfo ii = {};
-    ii.ApiVersion = VK_API_VERSION_1_3;
+    ii.ApiVersion = g_vk.api_version;
     ii.Instance = g_vk.inst;
     ii.PhysicalDevice = g_vk.phys;
     ii.Device = g_vk.dev;

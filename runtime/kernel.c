@@ -1,4 +1,5 @@
 // A small Horizon kernel: handles, threads, synchronization, memory, and the SVC dispatcher.
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -220,16 +221,45 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
     return t;
 }
 
-static void thread_start(KThread *t) {
+static uint32_t thread_start(KThread *t, int *host_error) {
+    // Serialize duplicate starts and completion with the same lock. A new host
+    // thread may run immediately, but cannot publish finished before started.
+    pthread_mutex_lock(&g_klock);
+    if (t->started || t->finished || g_rt_unwind) {
+        pthread_mutex_unlock(&g_klock);
+        if (host_error) *host_error = EALREADY;
+        return R_INVALID_STATE;
+    }
     pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 256ull << 20);  // guest recursion runs on the host stack
-    t->started = true;
-    pthread_create(&t->host, &attr, thread_main, t);
-    pthread_attr_destroy(&attr);
+    const char *operation = "pthread_attr_init";
+    int error = pthread_attr_init(&attr);
+    if (!error) {
+        operation = "pthread_attr_setstacksize";
+        error = pthread_attr_setstacksize(&attr, 256ull << 20);  // guest recursion runs on the host stack
+        if (!error) {
+            operation = "pthread_create";
+            error = pthread_create(&t->host, &attr, thread_main, t);
+        }
+        int destroy_error = pthread_attr_destroy(&attr);
+        if (destroy_error) LOG("[kernel] pthread_attr_destroy: %s (%d)\n", strerror(destroy_error), destroy_error);
+    }
+    // Failed startup leaves the thread dormant and retryable. Shutdown must
+    // never wait for or join a host thread that pthread_create did not create.
+    if (!error) t->started = true;
+    pthread_mutex_unlock(&g_klock);
+    if (host_error) *host_error = error;
+    if (error) {
+        LOG("[kernel] cannot start thread %llu: %s: %s (%d)\n",
+            (unsigned long long)t->id, operation, strerror(error), error);
+        return R_OUT_OF_RESOURCE;
+    }
+    return R_OK;
 }
 
 KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio) {
+    // main.npdm is external input; unchecked sizes can place the stack outside
+    // its fixed region or wrap the alignment calculation.
+    if (!stack_size || stack_size > STACK_SIZE) FATAL("invalid main stack size %llx\n", stack_size);
     uint64_t stack = STACK_BASE + STACK_SIZE - ((stack_size + 0xFFFF) & ~0xFFFFull);
     region_add(stack, stack_size, 0xB, 3);
     KThread *t = thread_new(entry, 0, stack + stack_size, prio, 0);
@@ -239,7 +269,10 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
 
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3) {
     t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3;
-    thread_start(t);  // the host main thread goes on to run the window event loop
+    int host_error;
+    uint32_t result = thread_start(t, &host_error);
+    if (result) FATAL("cannot start main guest thread: %s (%d), result %#x\n", strerror(host_error), host_error, result);
+    // The host main thread goes on to run the window event loop.
 }
 
 uint32_t kernel_current_thread_handle(void) { return t_cur ? t_cur->handle : 0; }
@@ -604,8 +637,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x09: {  // StartThread
         KObject *o = handle_get((uint32_t)x[0]);
         if (!o || o->type != KOBJ_THREAD) { x[0] = R_INVALID_HANDLE; break; }
-        thread_start((KThread *)o);
-        x[0] = R_OK;
+        x[0] = thread_start((KThread *)o, NULL);
         break;
     }
     case 0x0A: longjmp(t_cur->unwind, 1);  // ExitThread: back to thread_main, which signals the thread object
@@ -788,7 +820,9 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
 
 // Reboot, step 1: stop every guest thread (see rt_unwind_point) and join it. `idle` keeps the window responsive.
 void kernel_stop_threads(void (*idle)(void)) {
+    pthread_mutex_lock(&g_klock);
     g_rt_unwind = 1;
+    pthread_mutex_unlock(&g_klock);
     uint64_t t0 = plat_now_ns(), logged = t0;
     for (;;) {
         int live = 0;
@@ -802,11 +836,13 @@ void kernel_stop_threads(void (*idle)(void)) {
         if (now - logged > 3000000000ull) {  // (a thread that never reaches a safe point: who and where)
             logged = now;
             LOG("[reboot] still waiting for %d guest threads after %llums:\n", live, (unsigned long long)((now - t0) / 1000000));
+            pthread_mutex_lock(&g_klock);
             for (KThread *t = g_threads; t; t = t->anext)
                 if (t->started && !t->finished)
                     LOG("[reboot]   thread %llu (entry %llx) pc %llx lr %llx wait %d sync %d\n", (unsigned long long)t->id,
                         (unsigned long long)t->entry, (unsigned long long)t->cpu.pc, (unsigned long long)t->cpu.x[30],
                         t->wait_kind, t->in_sync_wait);
+            pthread_mutex_unlock(&g_klock);
         }
         if (idle) idle();
         usleep(2000);

@@ -1,4 +1,4 @@
-// Vulkan backend for the NVN layer (Windows; macOS uses runtime/nvn/metal.m + renderer.m).
+// Vulkan backend for the NVN layer (Windows, Linux and Android; macOS uses Metal).
 // Files: device.c (instance, window, swapchain, present, screenshots, ImGui hooks), textures.c (images, uploads,
 // views), exec.c (command execution: passes, draws, clears, copies, compute), shaders.c (GLSL -> SPIR-V, programs,
 // pipelines). Mirrors the Metal backend's behaviour; differences are noted where they happen.
@@ -9,7 +9,11 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#if defined(__ANDROID__) && defined(LARECOMP_ANDROID_CUSTOM_VULKAN)
+#include <volk.h>  // Complete provider-owned dispatch, with no system Vulkan symbol imports.
+#else
 #include <vulkan/vulkan.h>
+#endif
 #if __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
 #else
@@ -23,6 +27,29 @@ void vk_device_fault_report(void);
 #define VK_CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { if (r_ == VK_ERROR_DEVICE_LOST) vk_device_fault_report(); \
     FATAL("%s failed: %d (%s:%d)\n", #x, r_, __FILE__, __LINE__); } } while (0)
 
+// Android's loader may expose Vulkan 1.1 while the driver supplies newer functionality through extensions.
+// Resolve promoted commands from the device instead of linking Android API 33's Vulkan 1.3 exports.
+#ifdef __ANDROID__
+#define VK_ANDROID_COMMANDS(X) \
+    X(vkGetSemaphoreCounterValue, KHR, VK_API_VERSION_1_2) \
+    X(vkWaitSemaphores, KHR, VK_API_VERSION_1_2) \
+    X(vkCmdBeginRendering, KHR, VK_API_VERSION_1_3) \
+    X(vkCmdEndRendering, KHR, VK_API_VERSION_1_3) \
+    X(vkCmdPipelineBarrier2, KHR, VK_API_VERSION_1_3) \
+    X(vkQueueSubmit2, KHR, VK_API_VERSION_1_3) \
+    X(vkCmdWriteTimestamp2, KHR, VK_API_VERSION_1_3) \
+    X(vkCmdSetCullMode, EXT, VK_API_VERSION_1_3) \
+    X(vkCmdSetFrontFace, EXT, VK_API_VERSION_1_3) \
+    X(vkCmdSetPrimitiveTopology, EXT, VK_API_VERSION_1_3) \
+    X(vkCmdSetDepthTestEnable, EXT, VK_API_VERSION_1_3) \
+    X(vkCmdSetDepthWriteEnable, EXT, VK_API_VERSION_1_3) \
+    X(vkCmdSetDepthCompareOp, EXT, VK_API_VERSION_1_3) \
+    X(vkCmdSetStencilTestEnable, EXT, VK_API_VERSION_1_3) \
+    X(vkCmdSetStencilOp, EXT, VK_API_VERSION_1_3) \
+    X(vkCmdSetDepthBiasEnable, EXT, VK_API_VERSION_1_3) \
+    X(vkCmdSetPrimitiveRestartEnable, EXT, VK_API_VERSION_1_3)
+#endif
+
 typedef struct {
     VkInstance inst;
     VkPhysicalDevice phys;
@@ -31,6 +58,12 @@ typedef struct {
     uint32_t qfam;
     VmaAllocator vma;
     VkPhysicalDeviceProperties props;
+    uint32_t api_version;      // negotiated instance/device API (also passed to VMA and ImGui)
+#ifdef __ANDROID__
+#define VK_DISPATCH_FIELD(name, suffix, version) PFN_##name p_##name;
+    VK_ANDROID_COMMANDS(VK_DISPATCH_FIELD)
+#undef VK_DISPATCH_FIELD
+#endif
     VkPipelineCache pcache;
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
@@ -40,11 +73,32 @@ typedef struct {
     VkSwapchainKHR swapchain;
     VkFormat sc_format;
     VkExtent2D sc_extent;
+    bool sc_readback;
     uint32_t sc_count;
     VkImage sc_images[8];
     VkImageView sc_views[8];
 } VkG;
 extern VkG g_vk;
+
+#ifdef __ANDROID__
+#define vkGetSemaphoreCounterValue g_vk.p_vkGetSemaphoreCounterValue
+#define vkWaitSemaphores g_vk.p_vkWaitSemaphores
+#define vkCmdBeginRendering g_vk.p_vkCmdBeginRendering
+#define vkCmdEndRendering g_vk.p_vkCmdEndRendering
+#define vkCmdPipelineBarrier2 g_vk.p_vkCmdPipelineBarrier2
+#define vkQueueSubmit2 g_vk.p_vkQueueSubmit2
+#define vkCmdWriteTimestamp2 g_vk.p_vkCmdWriteTimestamp2
+#define vkCmdSetCullMode g_vk.p_vkCmdSetCullMode
+#define vkCmdSetFrontFace g_vk.p_vkCmdSetFrontFace
+#define vkCmdSetPrimitiveTopology g_vk.p_vkCmdSetPrimitiveTopology
+#define vkCmdSetDepthTestEnable g_vk.p_vkCmdSetDepthTestEnable
+#define vkCmdSetDepthWriteEnable g_vk.p_vkCmdSetDepthWriteEnable
+#define vkCmdSetDepthCompareOp g_vk.p_vkCmdSetDepthCompareOp
+#define vkCmdSetStencilTestEnable g_vk.p_vkCmdSetStencilTestEnable
+#define vkCmdSetStencilOp g_vk.p_vkCmdSetStencilOp
+#define vkCmdSetDepthBiasEnable g_vk.p_vkCmdSetDepthBiasEnable
+#define vkCmdSetPrimitiveRestartEnable g_vk.p_vkCmdSetPrimitiveRestartEnable
+#endif
 
 // ---- submissions (exec.c)
 // Work is recorded into the current command buffer; uploads go into a separate one that runs first.

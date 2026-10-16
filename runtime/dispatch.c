@@ -107,9 +107,12 @@ void *hle_alloc(uint64_t size) {
 
 void dispatch_init(void) {  // (after gamelib_load)
     const GameLibTables *g = gamelib_tables();
+    if (!g || !g->main_count || !g->sdk_count) FATAL("missing game function tables\n");
     uint64_t nm = *g->main_count, ns = *g->sdk_count;
-    tables[0] = (FnTable){g->main_addrs, g->main_fns, nm, g->main_addrs[0], g->main_addrs[nm - 1]};
-    tables[1] = (FnTable){g->sdk_addrs, g->sdk_fns, ns, g->sdk_addrs[0], g->sdk_addrs[ns - 1]};
+    if ((nm && (!g->main_addrs || !g->main_fns)) || (ns && (!g->sdk_addrs || !g->sdk_fns)))
+        FATAL("missing game function table entries\n");
+    tables[0] = (FnTable){g->main_addrs, g->main_fns, nm, nm ? g->main_addrs[0] : 0, nm ? g->main_addrs[nm - 1] : 0};
+    tables[1] = (FnTable){g->sdk_addrs, g->sdk_fns, ns, ns ? g->sdk_addrs[0] : 0, ns ? g->sdk_addrs[ns - 1] : 0};
 }
 
 GuestFn dispatch_lookup(uint64_t addr) {

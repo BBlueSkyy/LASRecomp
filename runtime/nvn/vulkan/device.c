@@ -14,11 +14,27 @@
 #include "vk.h"
 #include "../output_scale.h"
 #include "../renderer.h"
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+#include "../../platform/android_vulkan.h"
+#endif
 
 VkG g_vk;
 static SDL_Window *window;
 static atomic_bool ui_ready;
 static VkDebugUtilsMessengerEXT messenger;
+#ifdef __ANDROID__
+static atomic_bool android_background, android_surface_dirty;
+static bool SDLCALL android_lifecycle(void *unused, SDL_Event *event) {
+    (void)unused;
+    // Event watches run when the lifecycle event arrives, even if the SDL event loop is blocked while paused.
+    if (event->type == SDL_EVENT_WILL_ENTER_BACKGROUND) atomic_store(&android_background, true);
+    if (event->type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+        atomic_store(&android_surface_dirty, true);
+        atomic_store(&android_background, false);
+    }
+    return true;
+}
+#endif
 
 // ================================================================== instance / device
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
@@ -31,16 +47,32 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
 
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 static void create_instance(void) {
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    // SDL's helper has its own loader. Use provider surface dispatch for every Android provider.
+    const char *ext[16] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
+    uint32_t n_ext = 2;
+#else
     Uint32 n_sdl = 0;
     const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_sdl);
+    if (!sdl_ext || !n_sdl) FATAL("SDL_Vulkan_GetInstanceExtensions: %s\n", SDL_GetError());
     const char *ext[16];
     uint32_t n_ext = 0;
-    for (Uint32 i = 0; i < n_sdl && n_ext < 14; i++) ext[n_ext++] = sdl_ext[i];
+    if (n_sdl > 14) FATAL("too many SDL Vulkan instance extensions: %u\n", n_sdl);
+    for (Uint32 i = 0; i < n_sdl; i++) ext[n_ext++] = sdl_ext[i];
+#endif
     bool validate = getenv("LARECOMP_VK_VALIDATION") != NULL;
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
+    g_vk.api_version = VK_API_VERSION_1_3;
+#ifdef __ANDROID__
+    uint32_t supported = VK_API_VERSION_1_0;
+    PFN_vkEnumerateInstanceVersion version = (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(NULL, "vkEnumerateInstanceVersion");
+    if (version) VK_CHECK(version(&supported));
+    if (supported < VK_API_VERSION_1_1) FATAL("[vk] Android Vulkan loader must support Vulkan 1.1 or newer\n");
+    if (supported < g_vk.api_version) g_vk.api_version = supported;
+#endif
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
-                             .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
+                             .pEngineName = "LARecomp", .apiVersion = g_vk.api_version};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
@@ -52,7 +84,12 @@ static void create_instance(void) {
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     }
-    if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (is a Vulkan 1.3 driver installed?)\n", r);
+    if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (requested Vulkan %u.%u)\n", r,
+        VK_API_VERSION_MAJOR(g_vk.api_version), VK_API_VERSION_MINOR(g_vk.api_version));
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    volkLoadInstanceOnly(g_vk.inst);
+    if (!vkCreateAndroidSurfaceKHR || !vkDestroySurfaceKHR) FATAL("[vk] selected provider has no Android surface dispatch\n");
+#endif
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
             (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
@@ -71,6 +108,36 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     return false;
 }
 
+#ifdef __ANDROID__
+#include "android_caps.h"
+#endif
+
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+static bool custom_driver_matches(VkPhysicalDevice device, uint32_t api) {
+    if (!android_vulkan_is_custom()) return true;
+    // A failed upstream hook may fall back to the vendor driver; do not claim that is custom Turnip.
+    uint32_t count = 0;
+    if (vkEnumerateDeviceExtensionProperties(device, NULL, &count, NULL) != VK_SUCCESS) return false;
+    VkExtensionProperties *extensions = calloc(count, sizeof *extensions);
+    if (!extensions) return false;
+    VkResult result = vkEnumerateDeviceExtensionProperties(device, NULL, &count, extensions);
+    bool available = result == VK_SUCCESS && (api >= VK_API_VERSION_1_2 ||
+        has_ext(extensions, count, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME));
+    free(extensions);
+    if (!available) { LOG("[vk] selected custom driver cannot report its identity\n"); return false; }
+    VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver};
+    vkGetPhysicalDeviceProperties2(device, &properties);
+    if (driver.driverID != VK_DRIVER_ID_MESA_TURNIP) {
+        LOG("[vk] custom provider returned driver '%s' (id %u), expected Mesa Turnip; refusing vendor fallback\n",
+            driver.driverName, driver.driverID);
+        return false;
+    }
+    LOG("[vk] selected custom Turnip: %s %s\n", driver.driverName, driver.driverInfo);
+    return true;
+}
+#endif
+
 // Discrete GPU first (LARECOMP_GPU=<index> picks one), needs Vulkan 1.3 and a queue that can present.
 static void pick_device(void) {
     uint32_t n = 0;
@@ -84,15 +151,27 @@ static void pick_device(void) {
         vkGetPhysicalDeviceProperties(pd[i], &p);
         LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+        if (!custom_driver_matches(pd[i], p.apiVersion)) continue;
+#endif
+#ifdef __ANDROID__
+        VkAndroidCaps caps;
+        uint32_t api = p.apiVersion < g_vk.api_version ? p.apiVersion : g_vk.api_version;
+        if (!android_capabilities(pd[i], api, &caps) || android_present_queue(pd[i]) == UINT32_MAX) continue;
+#else
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
+#endif
         int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
         if ((int)i == want) score = 100;
         if (score > best_score) { best_score = score; best = (int)i; }
     }
-    if (best < 0) FATAL("no Vulkan 1.3 device\n");
+    if (best < 0) FATAL("no Vulkan device meets the renderer's feature and presentation requirements (see missing capabilities above)\n");
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
+#ifdef __ANDROID__
+    if (g_vk.props.apiVersion < g_vk.api_version) g_vk.api_version = g_vk.props.apiVersion;
+#endif
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
     VkQueueFamilyProperties *qp = calloc(nq, sizeof *qp);
@@ -123,7 +202,8 @@ void vk_device_fault_report(void) {
     if (c.vendorInfoCount > 16) c.vendorInfoCount = 16;
     c.vendorBinarySize = 0;
     VkDeviceFaultInfoEXT info = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT, .pAddressInfos = addr, .pVendorInfos = vend};
-    if (get(g_vk.dev, &c, &info) != VK_SUCCESS && 0) return;
+    VkResult result = get(g_vk.dev, &c, &info);
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) return;
     LOG("[vk] device fault: %s\n", info.description);
     static const char *const kind[] = {"none", "read invalid", "write invalid", "execute invalid", "ip unknown", "ip invalid", "ip valid"};
     for (uint32_t i = 0; i < c.addressInfoCount; i++)
@@ -135,6 +215,17 @@ void vk_device_fault_report(void) {
 }
 
 static void create_device(void) {
+#ifdef __ANDROID__
+    VkAndroidCaps caps;
+    if (!android_capabilities(g_vk.phys, g_vk.api_version, &caps)) FATAL("[vk] selected device lost required capabilities\n");
+    android_enable_features(&caps);
+    const char *const *ext = caps.ext;
+    uint32_t n_ext = caps.n_ext;
+    g_vk.custom_border = caps.custom_border;
+    g_vk.divisor = caps.divisor;
+    g_vk.host_import = caps.host_import;
+    g_fault_ext = caps.fault;
+#else
     uint32_t ne = 0;
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
@@ -152,10 +243,14 @@ static void create_device(void) {
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;
     free(ep);
+#endif
 
     // features the backend relies on (all present on current desktop drivers)
     VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+#ifdef __ANDROID__
+    VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = caps.features.pNext};
+#else
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT,
         .vertexAttributeInstanceRateDivisor = VK_TRUE, .vertexAttributeInstanceRateZeroDivisor = VK_FALSE};
@@ -176,12 +271,19 @@ static void create_device(void) {
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
+#endif
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
     b->fillModeNonSolid = h->fillModeNonSolid;
     b->samplerAnisotropy = h->samplerAnisotropy;
     b->textureCompressionBC = h->textureCompressionBC;
+#ifdef __ANDROID__
+    // Mobile GPUs usually sample the game's ASTC textures directly; format support alone does not enable
+    // the compression feature. Devices without ASTC retain textures.c's software decode path.
+    b->textureCompressionASTC_LDR = h->textureCompressionASTC_LDR;
+    b->textureCompressionETC2 = h->textureCompressionETC2;
+#endif
     b->shaderInt64 = h->shaderInt64;
     b->depthBiasClamp = h->depthBiasClamp;
     b->depthClamp = h->depthClamp;
@@ -200,10 +302,22 @@ static void create_device(void) {
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    volkLoadDevice(g_vk.dev);
+#endif
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+#ifdef __ANDROID__
+    android_load_commands();
+    LOG("[vk] Android Vulkan %u.%u: renderer capability checks passed\n",
+        VK_API_VERSION_MAJOR(g_vk.api_version), VK_API_VERSION_MINOR(g_vk.api_version));
+#endif
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
-                                 .vulkanApiVersion = VK_API_VERSION_1_3};
+                                 .vulkanApiVersion = g_vk.api_version};
+#ifdef __ANDROID__
+    VmaVulkanFunctions functions = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};
+    ai.pVulkanFunctions = &functions;
+#endif
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -276,8 +390,15 @@ static void create_swapchain(void) {
     SDL_GetWindowSizeInPixels(window, &w, &h);
     VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : (VkExtent2D){(uint32_t)w, (uint32_t)h};
     if (!ext.width || !ext.height) return;  // minimised
+#ifdef __ANDROID__
+    if (ext.width < caps.minImageExtent.width) ext.width = caps.minImageExtent.width;
+    if (ext.height < caps.minImageExtent.height) ext.height = caps.minImageExtent.height;
+    if (ext.width > caps.maxImageExtent.width) ext.width = caps.maxImageExtent.width;
+    if (ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
+#endif
     uint32_t nf = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(g_vk.phys, g_vk.surface, &nf, NULL);
+    if (!nf) FATAL("[vk] presentation surface offers no formats\n");
     VkSurfaceFormatKHR fmts[64];
     if (nf > 64) nf = 64;
     vkGetPhysicalDeviceSurfaceFormatsKHR(g_vk.phys, g_vk.surface, &nf, fmts);
@@ -285,9 +406,16 @@ static void create_swapchain(void) {
     VkSurfaceFormatKHR sf = fmts[0];
     for (uint32_t i = 0; i < nf; i++)
         if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; break; }
+#ifdef __ANDROID__
+    // Android commonly exposes RGBA instead of the desktop BGRA format.
+    if (sf.format != VK_FORMAT_B8G8R8A8_UNORM)
+        for (uint32_t i = 0; i < nf; i++)
+            if (fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; break; }
+#endif
     uint32_t count = caps.minImageCount + 1;
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;
+    if (count < caps.minImageCount) FATAL("[vk] surface requires more than 8 swapchain images\n");
     VkSwapchainKHR old = g_vk.swapchain;
     VkSwapchainCreateInfoKHR ci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_vk.surface, .minImageCount = count,
@@ -296,13 +424,24 @@ static void create_swapchain(void) {
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = present_mode(), .clipped = VK_TRUE,
         .oldSwapchain = old};
+    g_vk.sc_readback = true;
+#ifdef __ANDROID__
+    // Only colour attachment usage is mandatory for a presentable image. Readback is optional; transfer-dst
+    // is unused by this renderer and isn't supported by every Android presentation engine.
+    if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) FATAL("[vk] surface has no colour attachment support\n");
+    g_vk.sc_readback = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | (g_vk.sc_readback ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
+    if (!(caps.supportedCompositeAlpha & ci.compositeAlpha))
+        ci.compositeAlpha = (VkCompositeAlphaFlagBitsKHR)(caps.supportedCompositeAlpha & (0u - caps.supportedCompositeAlpha));
+#endif
     VK_CHECK(vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain));
     for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
     if (old) vkDestroySwapchainKHR(g_vk.dev, old, NULL);
     g_vk.sc_format = sf.format;
     g_vk.sc_extent = ext;
-    g_vk.sc_count = 8;
-    vkGetSwapchainImagesKHR(g_vk.dev, g_vk.swapchain, &g_vk.sc_count, g_vk.sc_images);
+    VK_CHECK(vkGetSwapchainImagesKHR(g_vk.dev, g_vk.swapchain, &g_vk.sc_count, NULL));
+    if (g_vk.sc_count > 8) FATAL("[vk] driver returned more than 8 swapchain images\n");
+    VK_CHECK(vkGetSwapchainImagesKHR(g_vk.dev, g_vk.swapchain, &g_vk.sc_count, g_vk.sc_images));
     for (uint32_t i = 0; i < g_vk.sc_count; i++) {
         VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = g_vk.sc_images[i],
                                     .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = sf.format,
@@ -312,7 +451,7 @@ static void create_swapchain(void) {
 }
 
 static void recreate_swapchain(void) {
-    vkDeviceWaitIdle(g_vk.dev);
+    VK_CHECK(vkDeviceWaitIdle(g_vk.dev));
     create_swapchain();
 }
 
@@ -322,6 +461,54 @@ static void recreate_swapchain(void) {
 static VkSemaphore acquire_sem[FRAMES], done_sem[8];
 static uint64_t slot_seq[FRAMES];
 static int slot;
+
+#ifdef __ANDROID__
+static void SDLCALL android_create_surface(void *result) {
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    if (g_vk.surface) vkDestroySurfaceKHR(g_vk.inst, g_vk.surface, NULL);
+    g_vk.surface = VK_NULL_HANDLE;
+    struct ANativeWindow *native_window = SDL_GetPointerProperty(SDL_GetWindowProperties(window),
+        SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, NULL);
+    *(bool *)result = false;
+    if (!native_window) { SDL_SetError("Android native window is unavailable"); return; }
+    VkAndroidSurfaceCreateInfoKHR ci = {.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = native_window};
+    VkResult r = vkCreateAndroidSurfaceKHR(g_vk.inst, &ci, NULL, &g_vk.surface);
+    if (r != VK_SUCCESS) { SDL_SetError("vkCreateAndroidSurfaceKHR: %d", r); return; }
+    *(bool *)result = true;
+#else
+    if (g_vk.surface) SDL_Vulkan_DestroySurface(g_vk.inst, g_vk.surface, NULL);
+    g_vk.surface = VK_NULL_HANDLE;
+    *(bool *)result = SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface);
+#endif
+}
+
+static bool android_recreate_surface(void) {
+    // Android replaces ANativeWindow when returning to the foreground. The Vulkan work stays on the renderer
+    // thread; SDL surface creation is marshalled to the window's main thread as required by SDL3.
+    VK_CHECK(vkDeviceWaitIdle(g_vk.dev));
+    for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
+    if (g_vk.swapchain) vkDestroySwapchainKHR(g_vk.dev, g_vk.swapchain, NULL);
+    g_vk.swapchain = VK_NULL_HANDLE;
+    g_vk.sc_count = 0;
+    for (int i = 0; i < FRAMES; i++) {
+        if (acquire_sem[i]) vkDestroySemaphore(g_vk.dev, acquire_sem[i], NULL);
+        acquire_sem[i] = VK_NULL_HANDLE;
+        slot_seq[i] = 0;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (done_sem[i]) vkDestroySemaphore(g_vk.dev, done_sem[i], NULL);
+        done_sem[i] = VK_NULL_HANDLE;
+    }
+    bool created = false;
+    if (!SDL_RunOnMainThread(android_create_surface, &created, true) || !created) {
+        LOG("[vk] Android surface not ready: %s\n", SDL_GetError());
+        atomic_store(&android_surface_dirty, true);
+        return false;
+    }
+    create_swapchain();
+    return g_vk.swapchain != VK_NULL_HANDLE;
+}
+#endif
 
 static VkSemaphore binary_semaphore(void) {
     VkSemaphoreCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -349,6 +536,10 @@ static Frame cur_frame;
 // nothing to draw into (minimised window).
 bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = false;
+#ifdef __ANDROID__
+    if (atomic_load(&android_background)) return false;
+    if (atomic_exchange(&android_surface_dirty, false) && !android_recreate_surface()) return false;
+#endif
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     if (!w || !h) return false;  // minimised
@@ -360,11 +551,20 @@ bool vk_frame_begin(const float clear[4]) {
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     vk_wait_seq(slot_seq[slot]);
-    VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+    uint64_t timeout = UINT64_MAX;
+#ifdef __ANDROID__
+    timeout = 0;  // nonblocking acquire: lifecycle changes must not leave the renderer waiting for a retired window
+#endif
+    VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, timeout, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
-        r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+        r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, timeout, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
     }
+#ifdef __ANDROID__
+    if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&android_surface_dirty, true);
+    if (r == VK_TIMEOUT || r == VK_NOT_READY) return false;
+#endif
+    if (r == VK_ERROR_DEVICE_LOST) VK_CHECK(r);  // Replacing a surface cannot repair a lost device.
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
     cur_frame.acquired = acquire_sem[slot];
     slot_seq[slot] = vk_pending_seq();
@@ -419,8 +619,9 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
 }
 
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
-void vk_frame_end(const char *shot_path) {
+void vk_frame_end(const char *shot_path, bool guest_frame) {
     if (!cur_frame.ok) return;
+    if (shot_path && !g_vk.sc_readback) { LOG("[vk] window screenshots are unsupported by this presentation surface\n"); shot_path = NULL; }
     VkCommandBuffer cb = vk_cmd();
     vkCmdEndRendering(cb);
     VkSpan shot = {0};
@@ -433,17 +634,39 @@ void vk_frame_end(const char *shot_path) {
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
+#ifdef __ANDROID__
+    // Only guest NVN texture presentation counts here. A synthetic diagnostic
+    // clear or the reboot black frame must never be reported as game output.
+    static bool first_guest_present_logged;
+    if (guest_frame && !first_guest_present_logged && (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR)) {
+        first_guest_present_logged = true;
+        LOG("[android] first guest NVN frame submitted to the Android swapchain (%ux%u); "
+            "pixel contents and screen visibility are not yet verified\n",
+            g_vk.sc_extent.width, g_vk.sc_extent.height);
+    }
+    if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&android_surface_dirty, true);
+#endif
+    if (r == VK_ERROR_DEVICE_LOST) VK_CHECK(r);
+#ifndef __ANDROID__
+    (void)guest_frame;
+#endif
+    // Readback belongs to the *old* swapchain. Complete it using its actual
+    // extent/format before recreating a suboptimal or out-of-date surface.
+    // Recreating first could change sc_extent and overrun the old shot buffer.
+    VkExtent2D captured_extent = g_vk.sc_extent;
+    VkFormat captured_format = g_vk.sc_format;
+    bool recreate = r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR;
     cur_frame.ok = false;
     if (shot_path) {
         vk_wait_seq(seq);
-        uint32_t w = g_vk.sc_extent.width, h = g_vk.sc_extent.height;
+        uint32_t w = captured_extent.width, h = captured_extent.height;
         uint8_t *px = shot.ptr;
-        bool bgr = g_vk.sc_format == VK_FORMAT_B8G8R8A8_UNORM || g_vk.sc_format == VK_FORMAT_B8G8R8A8_SRGB;
+        bool bgr = captured_format == VK_FORMAT_B8G8R8A8_UNORM || captured_format == VK_FORMAT_B8G8R8A8_SRGB;
         for (uint64_t i = 0; bgr && i < (uint64_t)w * h; i++) { uint8_t t = px[i * 4]; px[i * 4] = px[i * 4 + 2]; px[i * 4 + 2] = t; }
         for (uint64_t i = 0; i < (uint64_t)w * h; i++) px[i * 4 + 3] = 255;
         vk_save_png(shot_path, px, w, h);
     }
+    if (recreate) recreate_swapchain();
 }
 
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) {
@@ -517,7 +740,20 @@ void backend_present(NvnTexture *t) {
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)total_frames + 1 == win_shot;
-        vk_frame_end(shot ? "build/window.png" : NULL);
+        // One private screenshot from the *real guest* presentation path helps
+        // distinguish a booted game from a synthetic Vulkan clear on hardware.
+        // Never include it in CI artifacts: it may contain the owner's game.
+#ifdef __ANDROID__
+        static bool first_guest_capture_attempted;
+        const char *capture = shot ? "build/window.png" : NULL;
+        if (!first_guest_capture_attempted && g_vk.sc_readback) {
+            capture = "first_guest_frame.png";
+            first_guest_capture_attempted = true;
+        }
+        vk_frame_end(capture, true);
+#else
+        vk_frame_end(shot ? "build/window.png" : NULL, true);
+#endif
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
         renderer_submit();
@@ -642,7 +878,13 @@ void ui_window_init(void) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     int win_w = 1280, win_h = 720;
     if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
-    SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    SDL_WindowFlags wflags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    char provider_error[512];
+    if (!android_vulkan_init(provider_error, sizeof provider_error)) FATAL("[vk] %s\n", provider_error);
+#else
+    wflags |= SDL_WINDOW_VULKAN;
+#endif
     if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
     {   // scripted test runs (user input ignored: runtime/hle/input.c input_user_blocked) open without taking the
         // keyboard focus from whatever the player is doing
@@ -653,11 +895,20 @@ void ui_window_init(void) {
     }
     window = SDL_CreateWindow("LAS Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
+#ifdef __ANDROID__
+    if (!SDL_AddEventWatch(android_lifecycle, NULL)) FATAL("SDL_AddEventWatch: %s\n", SDL_GetError());
+#endif
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    bool created = false;
+    android_create_surface(&created);  // ui_window_init runs on SDL's main thread.
+    if (!created) FATAL("[vk] Android surface: %s\n", SDL_GetError());
+#else
     if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+#endif
     pick_device();
     create_device();
     create_swapchain();
@@ -685,7 +936,7 @@ void backend_reset(void) {
 void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)
 void backend_clear_window(void) {
     static const float black[4] = {0, 0, 0, 1};
-    if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
+    if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL, false);
 }
 
 int ui_run(void) {
