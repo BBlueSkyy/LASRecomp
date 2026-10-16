@@ -65,6 +65,8 @@ with tempfile.TemporaryDirectory(prefix='las-boot-') as tmp:
     (valid / 'sdk').write_bytes(nso(True))
     cases = [('boot and three resets', valid, 'boot', None),
              ('empty compiled SDK table', valid, 'empty-table', None),
+             ('real host thread resource failure and retry', valid, 'thread-resource-retry', None),
+             ('main host thread resource failure', valid, 'main-thread-resource', 'cannot start main guest thread'),
              ('oversized main stack', valid, 'bad-stack', 'invalid main stack'),
              ('zero main stack', valid, 'zero-stack', 'invalid main stack'),
              ('fatal from guest thread', valid, 'fatal-guest', 'brk #0'),
