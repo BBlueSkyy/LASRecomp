@@ -57,13 +57,13 @@ jobs:
           unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libhook_impl.so'
           unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libfile_redirect_hook.so'
           unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libgsl_alloc_hook.so'
-          if unzip -Z1 "$APK" | grep -Eq 'lib/arm64-v8a/(lasgame|libvulkan_freedreno)\\.so'; then
+          if unzip -Z1 "$APK" | grep -Eq 'lib/arm64-v8a/(lasgame|libvulkan_freedreno)\.so'; then
             echo 'Private game code or a custom GPU driver must never be packaged'
             exit 1
           fi
           unzip -p "$APK" lib/arm64-v8a/liblasrecomp.so > /tmp/las-turnip-runtime.so
           "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" --dynamic /tmp/las-turnip-runtime.so > /tmp/las-turnip-dynamic.txt
-          if grep -Eq '\\(NEEDED\\).*\\[libvulkan\\.so\\]' /tmp/las-turnip-dynamic.txt; then
+          if grep -Eq '\(NEEDED\).*\[libvulkan\.so\]' /tmp/las-turnip-dynamic.txt; then
             echo 'Custom Vulkan provider accidentally depends on the system Vulkan loader'
             exit 1
           fi
