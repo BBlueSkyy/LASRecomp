@@ -650,17 +650,23 @@ void vk_frame_end(const char *shot_path, bool guest_frame) {
 #ifndef __ANDROID__
     (void)guest_frame;
 #endif
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
+    // Readback belongs to the *old* swapchain. Complete it using its actual
+    // extent/format before recreating a suboptimal or out-of-date surface.
+    // Recreating first could change sc_extent and overrun the old shot buffer.
+    VkExtent2D captured_extent = g_vk.sc_extent;
+    VkFormat captured_format = g_vk.sc_format;
+    bool recreate = r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR;
     cur_frame.ok = false;
     if (shot_path) {
         vk_wait_seq(seq);
-        uint32_t w = g_vk.sc_extent.width, h = g_vk.sc_extent.height;
+        uint32_t w = captured_extent.width, h = captured_extent.height;
         uint8_t *px = shot.ptr;
-        bool bgr = g_vk.sc_format == VK_FORMAT_B8G8R8A8_UNORM || g_vk.sc_format == VK_FORMAT_B8G8R8A8_SRGB;
+        bool bgr = captured_format == VK_FORMAT_B8G8R8A8_UNORM || captured_format == VK_FORMAT_B8G8R8A8_SRGB;
         for (uint64_t i = 0; bgr && i < (uint64_t)w * h; i++) { uint8_t t = px[i * 4]; px[i * 4] = px[i * 4 + 2]; px[i * 4 + 2] = t; }
         for (uint64_t i = 0; i < (uint64_t)w * h; i++) px[i * 4 + 3] = 255;
         vk_save_png(shot_path, px, w, h);
     }
+    if (recreate) recreate_swapchain();
 }
 
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) {
