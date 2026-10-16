@@ -46,7 +46,7 @@ def package(ndk: Path, llvm: Path, out: Path) -> None:
                 raise ValueError(f"unexpected target header outside public toolchain: {source}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
-        for name in ("cpu.h", "simd.h", "simd_fp.h", "gamelib.h"):
+        for name in ("cpu.h", "simd.h", "simd_fp.h", "gamelib.h", "gamelib_contract.h"):
             shutil.copyfile(root / "runtime" / name, payload / "runtime" / name)
         shutil.copyfile(root / "tools/gamelib_entry.c", payload / "gamelib_entry.c")
         library = Path("usr/lib/aarch64-linux-android/28")

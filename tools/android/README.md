@@ -22,8 +22,12 @@ assets are still read by the normal game loader and are not compiled into this
 module. `--out` and `--work-dir` allow a separate artifact and temporary location.
 `--apk` extracts only the ARM64 runtime library into temporary host storage;
 manual library extraction is unnecessary. `--runtime-lib` remains supported.
-Use the same source commit as the APK. The default guest base matches the normal
-Android build; a custom `-PguestBase=0x...` APK requires matching `--guest-base`.
+Use the same generator/ABI sources as the APK. The builder reads the exported
+`lasrecomp_build_contract_v1` data from the actual runtime ELF without executing
+ARM64 code on the host. It selects that APK's guest base and refuses a source
+fingerprint mismatch before starting generation. `--guest-base` is an optional
+assertion against the APK, including custom `-PguestBase=0x...` layouts. APKs
+predating the exported contract must be rebuilt from this branch.
 The generated module and sidecar are private outputs: do not upload them to public
 Actions artifacts or commit them.
 

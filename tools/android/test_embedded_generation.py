@@ -92,12 +92,14 @@ class EmbeddedGeneratorTests(unittest.TestCase):
             if ndk:
                 target = Path(ndk) / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang'
                 runtime = stage / 'liblasrecomp.so'
+                identity = gamelib_id(ROOT, ANDROID_GUEST_BASE)
                 # These are actual runtime sources, not import stubs. This fixture
                 # exercises their ARM64 link boundary, not Android execution.
                 subprocess.run([str(target), '-shared', '-fPIC', '-O1', '-I', str(ROOT / 'runtime'),
+                                f'-DGAMELIB_ID="{identity}"', f'-DLARECOMP_GUEST_BASE={ANDROID_GUEST_BASE}',
                                 str(ROOT / 'runtime/fnprof.c'), str(ROOT / 'runtime/platform/android.c'),
+                                str(ROOT / 'runtime/gamelib_contract.c'),
                                 '-Wl,-soname,liblasrecomp.so', '-llog', '-ldl', '-o', str(runtime)], check=True)
-                identity = gamelib_id(ROOT, ANDROID_GUEST_BASE)
                 compiled = []
 
                 def compile_one(unit, obj):

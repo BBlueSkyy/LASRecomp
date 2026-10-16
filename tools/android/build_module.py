@@ -8,6 +8,7 @@ Python executable nor an NDK host executable can be run inside an Android app.
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import os
+import re
 from pathlib import Path
 import shutil
 import struct
@@ -17,7 +18,7 @@ import tempfile
 import zipfile
 
 from gamelib_id import COMPILE_FLAGS, LINK_FLAGS, gamelib_id
-from address_layout import ANDROID_GUEST_BASE, SDK_OFFSET, guest_base
+from address_layout import SDK_OFFSET, guest_base
 
 
 def run(args: list[str], **kwargs) -> None:
@@ -45,6 +46,74 @@ def validate_elf(path: Path) -> None:
         raise ValueError("compiler did not produce an AArch64 ET_DYN shared library")
 
 
+def runtime_contract(path: Path) -> dict:
+    """Read the APK's exported ABI data, never dlopen an ARM64 library on the host."""
+    validate_elf(path)
+    if path.stat().st_size > 512 * 1024 * 1024:
+        raise ValueError('runtime ELF exceeds 512 MiB')
+    data = path.read_bytes()
+
+    def region(offset, size):
+        if offset > len(data) or size > len(data) - offset:
+            raise ValueError('runtime ELF table is outside the file')
+        return data[offset:offset + size]
+
+    phoff, shoff = struct.unpack_from('<QQ', data, 32)
+    phsize, phnum, shsize, shnum = struct.unpack_from('<HHHH', data, 54)
+    if phsize < 56 or shsize < 64 or not phnum or not shnum:
+        raise ValueError('runtime ELF has no readable build contract tables')
+    region(phoff, phsize * phnum)
+    region(shoff, shsize * shnum)
+    sections = [struct.unpack_from('<IIQQQQIIQQ', data, shoff + i * shsize) for i in range(shnum)]
+    contracts = []
+    for section in sections:
+        _, kind, _, _, offset, size, link, _, _, entry_size = section
+        if kind != 11:  # SHT_DYNSYM, retained when Android strips debug symbols
+            continue
+        if entry_size < 24 or size % entry_size or link >= shnum:
+            raise ValueError('invalid runtime ELF dynamic symbol table')
+        region(offset, size)
+        strings = sections[link]
+        if strings[1] != 3:
+            raise ValueError('runtime ELF symbols have no string table')
+        names = region(strings[4], strings[5])
+        for index in range(size // entry_size):
+            name, info, other, defined, value, symbol_size = struct.unpack_from('<IBBHQQ', data, offset + index * entry_size)
+            if name >= len(names):
+                raise ValueError('invalid runtime ELF symbol name')
+            end = names.find(b'\0', name)
+            if end < 0:
+                raise ValueError('unterminated runtime ELF symbol name')
+            if names[name:end] != b'lasrecomp_build_contract_v1':
+                continue
+            if not defined or info & 15 != 1 or info >> 4 not in (1, 2) or other & 3 != 0 or symbol_size < 41:
+                raise ValueError('invalid runtime build contract symbol')
+            for i in range(phnum):
+                kind, flags, file_offset, address, _, file_size, _, _ = struct.unpack_from('<IIQQQQQQ', data, phoff + i * phsize)
+                if kind == 1 and flags & 4 and value >= address and value - address <= file_size:
+                    delta = value - address
+                    if symbol_size <= file_size - delta:
+                        contracts.append(region(file_offset + delta, symbol_size))
+    if len(contracts) != 1:
+        raise ValueError('APK runtime lacks a unique build contract; rebuild the APK from this branch')
+    blob = contracts[0]
+    magic, version, abi, size, base, identity = struct.unpack_from('<4sIIIQ17s', blob)
+    if magic != b'LASC' or version != 1 or abi != 1 or size != len(blob) or not re.fullmatch(b'[0-9a-f]{16}\0', identity):
+        raise ValueError('unsupported runtime build contract')
+    return {'abi': abi, 'guest_base': guest_base(base), 'id': identity[:-1].decode('ascii')}
+
+
+def match_runtime(path: Path, root: Path, requested_base=None):
+    contract = runtime_contract(path)
+    base = contract['guest_base']
+    if requested_base is not None and requested_base != base:
+        raise ValueError(f'guest layout mismatch: APK uses {base:#x}, requested {requested_base:#x}')
+    identity = gamelib_id(root, base)
+    if contract['id'] != identity:
+        raise ValueError('APK and current generator/ABI sources differ; check out the APK commit or rebuild the APK')
+    return base, identity
+
+
 def runtime_from_apk(apk: Path, directory: Path) -> Path:
     """Read only the installed runtime ABI; never import game code from an APK."""
     name = 'lib/arm64-v8a/liblasrecomp.so'
@@ -61,12 +130,12 @@ def runtime_from_apk(apk: Path, directory: Path) -> Path:
 
 def build(args: argparse.Namespace) -> Path:
     root = Path(__file__).resolve().parents[2]
-    cc = compiler(args.ndk.resolve(), args.api)
     game = args.game_dir.resolve()
     runtime = args.runtime_lib.resolve()
     if runtime.name != "liblasrecomp.so" or not runtime.is_file():
         raise ValueError("--runtime-lib must point to the APK build's liblasrecomp.so")
-    validate_elf(runtime)
+    args.guest_base, identity = match_runtime(runtime, root, args.guest_base)
+    cc = compiler(args.ndk.resolve(), args.api)
     for name in ("main", "sdk"):
         path = game / "exefs" / name
         with path.open("rb") as stream:
@@ -74,7 +143,6 @@ def build(args: argparse.Namespace) -> Path:
                 raise ValueError(f"{path} is not an extracted NSO")
     # Validate actual imports before starting a potentially lengthy generation.
     run([sys.executable, "-c", "import unicorn; import capstone; import lz4.block"], cwd=root / "tools")
-    identity = gamelib_id(root, args.guest_base)
     output = (args.out or game / "lasgame.so").resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="lasgame-", dir=args.work_dir) as temp:
@@ -125,8 +193,8 @@ def build(args: argparse.Namespace) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--guest-base", type=guest_base, default=ANDROID_GUEST_BASE,
-                        help="identity-address layout; must match the APK CMake LARECOMP_GUEST_BASE")
+    parser.add_argument("--guest-base", type=guest_base,
+                        help="optional layout assertion; otherwise use the APK's exported guest base")
     parser.add_argument("--game-dir", type=Path, required=True)
     parser.add_argument("--ndk", type=Path, default=os.environ.get("ANDROID_NDK_HOME"), required=not os.environ.get("ANDROID_NDK_HOME"))
     runtime = parser.add_mutually_exclusive_group(required=True)

@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
+#include "gamelib_contract.h"
 
 #if defined(_WIN32)
 #define GAMELIB_NAME "lasgame.dll"
@@ -21,10 +22,6 @@
 
 // GAMELIB_ID (-D, from the Makefile): a hash of the generator and the headers the game code is compiled against. A
 // library built with another one is rebuilt, not loaded.
-#ifndef GAMELIB_ID
-#define GAMELIB_ID "dev"
-#endif
-#define GAMELIB_ABI 1
 
 typedef struct {
     uint32_t abi;    // GAMELIB_ABI
