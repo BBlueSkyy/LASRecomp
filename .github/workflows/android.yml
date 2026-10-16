@@ -50,7 +50,10 @@ jobs:
           tools/test_android_platform.sh
           tools/test_android_vulkan_caps.sh
           python3 tools/test_runtime_boot.py
+          python3 tools/test_runtime_boot.py --guest-base 0x1000000000
           python3 tools/android/test_module.py
+          LARECOMP_TEST_GUEST_BASE=0x1000000000 python3 tools/android/test_module.py
+          python3 tools/android/test_runtime_contract.py
           python3 tools/android/test_compilation_cache.py
           android/tests/run.sh
       - name: Original generator and cached ARM64 module regression (synthetic NSOs)
@@ -60,6 +63,7 @@ jobs:
           python3 -m venv /tmp/las-generator-tests
           /tmp/las-generator-tests/bin/pip install unicorn==2.1.4 capstone==5.0.9 lz4==4.4.5
           /tmp/las-generator-tests/bin/python tools/android/test_embedded_generation.py
+          /tmp/las-generator-tests/bin/python tools/test_guest_layout.py
       - name: Build runtime ARM64 APK
         run: gradle -p android :app:assembleDebug --no-daemon --stacktrace
       - name: Verify runtime ELF and absence of game code
@@ -71,6 +75,14 @@ jobs:
           "$NM" -D /tmp/liblasrecomp.so | grep -E ' D __start_hle_impls$'
           "$NM" -D /tmp/liblasrecomp.so | grep -E ' D __start_services$'
           "$NM" -D /tmp/liblasrecomp.so | grep -E ' D __start_resets$'
+          "$NM" -D /tmp/liblasrecomp.so | grep -E ' [RD] lasrecomp_build_contract_v1$'
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, 'tools/android')
+          from build_module import match_runtime
+          match_runtime(Path('/tmp/liblasrecomp.so'), Path.cwd())
+          PY
           if "$NM" -D /tmp/liblasrecomp.so | grep -qE ' T f_70'; then exit 1; fi
       - uses: actions/upload-artifact@v4
         with:

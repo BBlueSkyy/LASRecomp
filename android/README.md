@@ -30,6 +30,14 @@ The workflow `.github/workflows/android.yml` builds dependencies, runs host regr
 
 ## Concrete remaining blockers
 
+The immediate first-frame path uses the externally compiled private module. It
+does not wait for embedded LLVM: the original generator needs the owner's actual
+v1.0.0 `exefs/main` and `exefs/sdk`, and device boot needs the imported RomFS.
+Synthetic fixtures cannot provide this module or demonstrate a Zelda image.
+The builder now reads the actual APK's exported ABI, fingerprint and guest base,
+rejecting a mismatch before generation. No private Zelda NSOs or a matching
+Zelda module were available for execution in the development environment.
+
 1. **On-device generation and compilation validation:** the opt-in implementation connects embedded CPython, the original generator, Unicorn/Capstone, a Python LZ4 decoder, Clang/LLD C++ callbacks, SHA-256 cache publication and a separate `:prepare` Activity. Dependency build/packaging scripts are checked in. The LLVM archives and compiler bridge have not completed a verified build/link or run on Android; the normal APK therefore keeps this disabled. See [embedded setup](../tools/android/README.md#experimental-on-device-setup).
 2. **Guest memory availability on real Android devices:** the guest layout was relocated consistently across the runtime, generator and ABI fingerprint to `0x1000000000..0x1320000000` by `e89ce33`. The exact reservation still must be tested on the target device; if that range is occupied by ART/vendor mappings, startup fails safely and a further layout change or real guest-to-host address translation is required. No foreign mapping is overwritten.
 3. **Device Vulkan capabilities/custom drivers:** API1.1 is accepted only with equivalent required features/extensions. The Moto G100 proprietary driver has not been proven to meet those requirements. A default-off libadrenotools/volk provider and SAF driver import are implemented. The [experimental Turnip workflow](../.github/workflows/android-turnip.yml) separately builds/tests a custom-provider APK without bundling any GPU driver; this still needs device validation. See [renderer contract](../runtime/nvn/vulkan/ANDROID.md).
