@@ -1,0 +1,74 @@
+name: Android ARM64 Turnip experiment
+
+on:
+  push:
+    branches: [port/android-arm64]
+    paths:
+      - 'android/**'
+      - 'runtime/**'
+      - 'tools/android/build-driver-deps.sh'
+      - 'tools/android/test_vulkan_build.py'
+      - '.github/workflows/android-turnip.yml'
+  workflow_dispatch:
+
+jobs:
+  turnip:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android toolchain
+        run: |
+          SDKROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(find "$SDKROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          test -n "$SDKMANAGER"
+          echo "ANDROID_HOME=$SDKROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDKROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDKROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+      # Validate our wrapper before checking out third-party source trees.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - uses: actions/cache@v4
+        with:
+          path: android/deps
+          key: android-arm64-r27c-deps-${{ hashFiles('tools/android-deps.sh') }}
+      - name: Build original Android runtime dependencies
+        run: tools/android-deps.sh
+      - name: Build optional Vulkan provider dependencies
+        run: tools/android/build-driver-deps.sh
+      - name: Verify both renderer backends link on ARM64
+        run: python3 tools/android/test_vulkan_build.py
+      - name: Build experimental custom-Vulkan APK
+        run: gradle -p android :app:assembleDebug -PcustomVulkan=true --no-daemon --stacktrace
+      - name: Verify APK has a complete native provider, without bundled game or driver
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/liblasrecomp.so'
+          unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libadrenotools.so'
+          unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libmain_hook.so'
+          unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libhook_impl.so'
+          unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libfile_redirect_hook.so'
+          unzip -Z1 "$APK" | grep -Fx 'lib/arm64-v8a/libgsl_alloc_hook.so'
+          if unzip -Z1 "$APK" | grep -Eq 'lib/arm64-v8a/(lasgame|libvulkan_freedreno)\\.so'; then
+            echo 'Private game code or a custom GPU driver must never be packaged'
+            exit 1
+          fi
+          unzip -p "$APK" lib/arm64-v8a/liblasrecomp.so > /tmp/las-turnip-runtime.so
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" --dynamic /tmp/las-turnip-runtime.so > /tmp/las-turnip-dynamic.txt
+          if grep -Eq '\\(NEEDED\\).*\\[libvulkan\\.so\\]' /tmp/las-turnip-dynamic.txt; then
+            echo 'Custom Vulkan provider accidentally depends on the system Vulkan loader'
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LASRecomp-Android-arm64-Turnip-experimental
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
