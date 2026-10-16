@@ -36,20 +36,32 @@ the surface's advertised capabilities.
 
 ## Custom Turnip drivers
 
-The current build uses Android's system Vulkan loader. Loading a Turnip `.so` by changing a version check or
-passing it to `dlopen` does not create a supported custom-driver path. Android linker namespaces, the driver's
-dependencies and its entry points need to be handled together, typically by an explicitly integrated
-`libadrenotools` implementation. No custom driver is bundled or silently selected.
+The default build uses Android's system Vulkan loader. Optional
+`LARECOMP_ANDROID_CUSTOM_VULKAN` enables the provider in `runtime/platform/android_vulkan.c`.
+`tools/android/build-driver-deps.sh` builds pinned libadrenotools and volk sources and preserves their licenses.
+No custom GPU driver binary is bundled. This path still requires Android-device validation; keep the build
+option disabled for release builds until tested on supported Adreno hardware.
 
-A future driver provider must initialize before creating the SDL window/Vulkan instance and own the driver
-handle plus `vkGetInstanceProcAddr` for the renderer's lifetime. The Android renderer must route **all** core
-Vulkan calls through that provider, extend the promoted-command table in `vk.h` into a complete dispatch
-table, and pass the provider's loaders to VMA and ImGui's `IMGUI_IMPL_VULKAN_NO_PROTOTYPES` path. SDL also needs
-the same provider, through a supported forwarding Vulkan-loader library or an explicit SDL Android integration;
-SDL's public loader currently accepts a library path rather than an existing driver handle. Mixing a custom
-instance with directly linked system-loader commands is invalid. Stock and custom providers must run the
-same capability checks and surface lifecycle. This integration remains separate work requiring Android-device
-validation; the existing dispatch table by itself does not implement custom Turnip loading.
+When enabled, volk routes every renderer command through one provider. VMA receives the provider's instance
+and device loaders; ImGui uses `IMGUI_IMPL_VULKAN_NO_PROTOTYPES` and the same loaders. The renderer creates
+Android surfaces directly from SDL's native-window property, avoiding SDL's separate system Vulkan loader.
+Both providers retain the same capability checks, lifecycle handling, and promoted-command resolution.
+A selected custom provider must report Mesa Turnip's driver ID; vendor fallback is rejected.
+
+The application must set these variables before SDL/native renderer startup:
+
+| Variable | Value |
+| --- | --- |
+| `LARECOMP_VK_DRIVER` | `system` (default) or `custom` |
+| `LARECOMP_VK_DRIVER_DIR` | App-private directory holding an extracted arm64 Turnip driver and dependencies |
+| `LARECOMP_VK_DRIVER_NAME` | Driver `.so` basename, without a path |
+| `LARECOMP_ANDROID_NATIVE_LIB_DIR` | `ApplicationInfo.nativeLibraryDir` |
+| `LARECOMP_VK_TMP_DIR` | Writable application cache directory; required for Android 9 |
+
+The provider retains its loader handle for the process lifetime. Changing the selected driver requires a
+process restart. Package libadrenotools and its hook shared libraries using `useLegacyPackaging=true`, as
+required by upstream. Driver files must be imported into private application storage rather than loaded from
+shared storage. Loading failures are reported instead of retrying with a different provider.
 
 ## Focused checks
 
@@ -60,3 +72,7 @@ extensions, rejection paths and all 17 promoted command resolutions.
 `tests/android_driver_smoke.c` additionally links the host Vulkan loader and exercises real device creation,
 dispatch and timeline queries at all three APIs. Use a compatible driver through `VK_ICD_FILENAMES`; a
 software driver is sufficient. It does not create an Android window or validate game rendering.
+
+`tests/android_provider_smoke.c` uses volk for all commands and must be compiled with `volk.c` and `-ldl`
+(without `-lvulkan`). It exercises the same capability/device/timeline contract through complete dispatch.
+This host test does not validate libadrenotools namespaces, Android WSI or lifecycle behavior.

@@ -9,7 +9,11 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#if defined(__ANDROID__) && defined(LARECOMP_ANDROID_CUSTOM_VULKAN)
+#include <volk.h>  // Complete provider-owned dispatch, with no system Vulkan symbol imports.
+#else
 #include <vulkan/vulkan.h>
+#endif
 #if __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
 #else

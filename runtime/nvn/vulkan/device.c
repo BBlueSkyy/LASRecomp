@@ -14,6 +14,9 @@
 #include "vk.h"
 #include "../output_scale.h"
 #include "../renderer.h"
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+#include "../../platform/android_vulkan.h"
+#endif
 
 VkG g_vk;
 static SDL_Window *window;
@@ -44,6 +47,11 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
 
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 static void create_instance(void) {
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    // SDL's helper has its own loader. Use provider surface dispatch for every Android provider.
+    const char *ext[16] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
+    uint32_t n_ext = 2;
+#else
     Uint32 n_sdl = 0;
     const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_sdl);
     if (!sdl_ext || !n_sdl) FATAL("SDL_Vulkan_GetInstanceExtensions: %s\n", SDL_GetError());
@@ -51,6 +59,7 @@ static void create_instance(void) {
     uint32_t n_ext = 0;
     if (n_sdl > 14) FATAL("too many SDL Vulkan instance extensions: %u\n", n_sdl);
     for (Uint32 i = 0; i < n_sdl; i++) ext[n_ext++] = sdl_ext[i];
+#endif
     bool validate = getenv("LARECOMP_VK_VALIDATION") != NULL;
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
@@ -77,6 +86,10 @@ static void create_instance(void) {
     }
     if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (requested Vulkan %u.%u)\n", r,
         VK_API_VERSION_MAJOR(g_vk.api_version), VK_API_VERSION_MINOR(g_vk.api_version));
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    volkLoadInstanceOnly(g_vk.inst);
+    if (!vkCreateAndroidSurfaceKHR || !vkDestroySurfaceKHR) FATAL("[vk] selected provider has no Android surface dispatch\n");
+#endif
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
             (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
@@ -99,6 +112,32 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
 #include "android_caps.h"
 #endif
 
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+static bool custom_driver_matches(VkPhysicalDevice device, uint32_t api) {
+    if (!android_vulkan_is_custom()) return true;
+    // A failed upstream hook may fall back to the vendor driver; do not claim that is custom Turnip.
+    uint32_t count = 0;
+    if (vkEnumerateDeviceExtensionProperties(device, NULL, &count, NULL) != VK_SUCCESS) return false;
+    VkExtensionProperties *extensions = calloc(count, sizeof *extensions);
+    if (!extensions) return false;
+    VkResult result = vkEnumerateDeviceExtensionProperties(device, NULL, &count, extensions);
+    bool available = result == VK_SUCCESS && (api >= VK_API_VERSION_1_2 ||
+        has_ext(extensions, count, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME));
+    free(extensions);
+    if (!available) { LOG("[vk] selected custom driver cannot report its identity\n"); return false; }
+    VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver};
+    vkGetPhysicalDeviceProperties2(device, &properties);
+    if (driver.driverID != VK_DRIVER_ID_MESA_TURNIP) {
+        LOG("[vk] custom provider returned driver '%s' (id %u), expected Mesa Turnip; refusing vendor fallback\n",
+            driver.driverName, driver.driverID);
+        return false;
+    }
+    LOG("[vk] selected custom Turnip: %s %s\n", driver.driverName, driver.driverInfo);
+    return true;
+}
+#endif
+
 // Discrete GPU first (LARECOMP_GPU=<index> picks one), needs Vulkan 1.3 and a queue that can present.
 static void pick_device(void) {
     uint32_t n = 0;
@@ -112,6 +151,9 @@ static void pick_device(void) {
         vkGetPhysicalDeviceProperties(pd[i], &p);
         LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+        if (!custom_driver_matches(pd[i], p.apiVersion)) continue;
+#endif
 #ifdef __ANDROID__
         VkAndroidCaps caps;
         uint32_t api = p.apiVersion < g_vk.api_version ? p.apiVersion : g_vk.api_version;
@@ -160,7 +202,8 @@ void vk_device_fault_report(void) {
     if (c.vendorInfoCount > 16) c.vendorInfoCount = 16;
     c.vendorBinarySize = 0;
     VkDeviceFaultInfoEXT info = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT, .pAddressInfos = addr, .pVendorInfos = vend};
-    if (get(g_vk.dev, &c, &info) != VK_SUCCESS && 0) return;
+    VkResult result = get(g_vk.dev, &c, &info);
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) return;
     LOG("[vk] device fault: %s\n", info.description);
     static const char *const kind[] = {"none", "read invalid", "write invalid", "execute invalid", "ip unknown", "ip invalid", "ip valid"};
     for (uint32_t i = 0; i < c.addressInfoCount; i++)
@@ -259,6 +302,9 @@ static void create_device(void) {
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    volkLoadDevice(g_vk.dev);
+#endif
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
 #ifdef __ANDROID__
     android_load_commands();
@@ -405,7 +451,7 @@ static void create_swapchain(void) {
 }
 
 static void recreate_swapchain(void) {
-    vkDeviceWaitIdle(g_vk.dev);
+    VK_CHECK(vkDeviceWaitIdle(g_vk.dev));
     create_swapchain();
 }
 
@@ -418,9 +464,22 @@ static int slot;
 
 #ifdef __ANDROID__
 static void SDLCALL android_create_surface(void *result) {
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    if (g_vk.surface) vkDestroySurfaceKHR(g_vk.inst, g_vk.surface, NULL);
+    g_vk.surface = VK_NULL_HANDLE;
+    struct ANativeWindow *native_window = SDL_GetPointerProperty(SDL_GetWindowProperties(window),
+        SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, NULL);
+    *(bool *)result = false;
+    if (!native_window) { SDL_SetError("Android native window is unavailable"); return; }
+    VkAndroidSurfaceCreateInfoKHR ci = {.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = native_window};
+    VkResult r = vkCreateAndroidSurfaceKHR(g_vk.inst, &ci, NULL, &g_vk.surface);
+    if (r != VK_SUCCESS) { SDL_SetError("vkCreateAndroidSurfaceKHR: %d", r); return; }
+    *(bool *)result = true;
+#else
     if (g_vk.surface) SDL_Vulkan_DestroySurface(g_vk.inst, g_vk.surface, NULL);
     g_vk.surface = VK_NULL_HANDLE;
     *(bool *)result = SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface);
+#endif
 }
 
 static bool android_recreate_surface(void) {
@@ -505,6 +564,7 @@ bool vk_frame_begin(const float clear[4]) {
     if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&android_surface_dirty, true);
     if (r == VK_TIMEOUT || r == VK_NOT_READY) return false;
 #endif
+    if (r == VK_ERROR_DEVICE_LOST) VK_CHECK(r);  // Replacing a surface cannot repair a lost device.
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
     cur_frame.acquired = acquire_sem[slot];
     slot_seq[slot] = vk_pending_seq();
@@ -577,6 +637,7 @@ void vk_frame_end(const char *shot_path) {
 #ifdef __ANDROID__
     if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&android_surface_dirty, true);
 #endif
+    if (r == VK_ERROR_DEVICE_LOST) VK_CHECK(r);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
     if (shot_path) {
@@ -786,7 +847,13 @@ void ui_window_init(void) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     int win_w = 1280, win_h = 720;
     if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
-    SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    SDL_WindowFlags wflags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    char provider_error[512];
+    if (!android_vulkan_init(provider_error, sizeof provider_error)) FATAL("[vk] %s\n", provider_error);
+#else
+    wflags |= SDL_WINDOW_VULKAN;
+#endif
     if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
     {   // scripted test runs (user input ignored: runtime/hle/input.c input_user_blocked) open without taking the
         // keyboard focus from whatever the player is doing
@@ -804,7 +871,13 @@ void ui_window_init(void) {
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
+#ifdef LARECOMP_ANDROID_CUSTOM_VULKAN
+    bool created = false;
+    android_create_surface(&created);  // ui_window_init runs on SDL's main thread.
+    if (!created) FATAL("[vk] Android surface: %s\n", SDL_GetError());
+#else
     if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+#endif
     pick_device();
     create_device();
     create_swapchain();
