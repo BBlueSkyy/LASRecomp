@@ -9,6 +9,8 @@
 static pthread_mutex_t python_lock = PTHREAD_MUTEX_INITIALIZER;
 static las_python_progress_fn current_progress;
 static void *current_opaque;
+static las_python_compile_fn current_compile;
+static las_python_link_fn current_link;
 static int initialized;
 
 static PyObject *report_progress(PyObject *self, PyObject *args) {
@@ -20,6 +22,41 @@ static PyObject *report_progress(PyObject *self, PyObject *args) {
 }
 
 static PyMethodDef progress_method = {"report", report_progress, METH_VARARGS, NULL};
+
+static PyObject *compile_object(PyObject *self, PyObject *args) {
+    (void)self;
+    const char *source, *object;
+    if (!PyArg_ParseTuple(args, "ss", &source, &object)) return NULL;
+    char error[8192] = {0};
+    if (!current_compile || current_compile(current_opaque, source, object, error, sizeof error)) {
+        PyErr_SetString(PyExc_RuntimeError, error[0] ? error : "Embedded Clang callback failed");
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+static PyObject *link_objects(PyObject *self, PyObject *args) {
+    (void)self;
+    PyObject *objects;
+    const char *output;
+    if (!PyArg_ParseTuple(args, "Os", &objects, &output)) return NULL;
+    PyObject *sequence = PySequence_Fast(objects, "Expected generated objects");
+    if (!sequence) return NULL;
+    Py_ssize_t count = PySequence_Fast_GET_SIZE(sequence);
+    const char **paths = calloc((size_t)count + 1, sizeof *paths);
+    if (!paths) { Py_DECREF(sequence); return PyErr_NoMemory(); }
+    for (Py_ssize_t i = 0; i < count; ++i) {
+        paths[i] = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(sequence, i));
+        if (!paths[i]) { free(paths); Py_DECREF(sequence); return NULL; }
+    }
+    char error[8192] = {0};
+    int failed = !current_link || current_link(current_opaque, paths, (size_t)count, output, error, sizeof error);
+    free(paths);
+    Py_DECREF(sequence);
+    if (failed) { PyErr_SetString(PyExc_RuntimeError, error[0] ? error : "Embedded LLD callback failed"); return NULL; }
+    Py_RETURN_NONE;
+}
+static PyMethodDef compile_method = {"compile", compile_object, METH_VARARGS, NULL};
+static PyMethodDef link_method = {"link", link_objects, METH_VARARGS, NULL};
 
 static void python_error(char *error, size_t size) {
     PyObject *type = NULL, *value = NULL, *trace = NULL;
@@ -45,9 +82,10 @@ static int append_path(PyConfig *config, const char *root, const char *suffix) {
     return PyStatus_Exception(status) ? -1 : 0;
 }
 
-int las_python_generate(const char *root, const char *native_dir, const char *game,
-                        const char *output, las_python_progress_fn progress, void *opaque,
-                        char *error, size_t error_size) {
+static int invoke(const char *root, const char *native_dir, const char *game,
+                  const char *output, const char *identity, las_python_compile_fn compile,
+                  las_python_link_fn link, las_python_progress_fn progress, void *opaque,
+                  char *error, size_t error_size) {
     if (error && error_size) *error = 0;
     if (!root || !native_dir || !game || !output) {
         if (error && error_size) snprintf(error, error_size, "Missing embedded generation path");
@@ -81,19 +119,45 @@ int las_python_generate(const char *root, const char *native_dir, const char *ga
     PyGILState_STATE gil = PyGILState_Ensure();
     current_progress = progress;
     current_opaque = opaque;
+    current_compile = compile; current_link = link;
     PyObject *module = PyImport_ImportModule("embedded_generate");
     PyObject *setup = module ? PyObject_GetAttrString(module, "install_native_loader") : NULL;
     PyObject *setup_result = setup ? PyObject_CallFunction(setup, "s", native_dir) : NULL;
-    PyObject *generate = setup_result ? PyObject_GetAttrString(module, "generate") : NULL;
+    PyObject *cache = setup_result && identity ? PyImport_ImportModule("compilation_cache") : NULL;
+    PyObject *generate = setup_result && (!identity || cache) ? PyObject_GetAttrString(identity ? cache : module,
+                                                  identity ? "build_cached" : "generate") : NULL;
     PyObject *callback = generate ? PyCFunction_New(&progress_method, NULL) : NULL;
-    PyObject *generated = callback ? PyObject_CallFunction(generate, "ssO", game, output, callback) : NULL;
+    PyObject *compile_callback = identity && callback ? PyCFunction_New(&compile_method, NULL) : NULL;
+    PyObject *link_callback = compile_callback ? PyCFunction_New(&link_method, NULL) : NULL;
+    PyObject *generated = NULL;
+    if (identity && callback && compile_callback && link_callback)
+        generated = PyObject_CallFunction(generate, "sssOOO", game, output, identity,
+                                           compile_callback, link_callback, callback);
+    else if (!identity && callback) generated = PyObject_CallFunction(generate, "ssO", game, output, callback);
+    Py_XDECREF(compile_callback); Py_XDECREF(link_callback); Py_XDECREF(cache);
     if (generated) result = 0;
     else python_error(error, error_size);
     Py_XDECREF(generated); Py_XDECREF(callback); Py_XDECREF(generate);
     Py_XDECREF(setup_result); Py_XDECREF(setup); Py_XDECREF(module);
-    current_progress = NULL; current_opaque = NULL;
+    current_progress = NULL; current_opaque = NULL; current_compile = NULL; current_link = NULL;
     PyGILState_Release(gil);
 unlock:
     pthread_mutex_unlock(&python_lock);
     return result;
+}
+
+int las_python_generate(const char *root, const char *native_dir, const char *game,
+                        const char *output, las_python_progress_fn progress, void *opaque,
+                        char *error, size_t error_size) {
+    return invoke(root, native_dir, game, output, NULL, NULL, NULL, progress, opaque, error, error_size);
+}
+int las_python_build(const char *root, const char *native_dir, const char *game,
+                     const char *assets, const char *identity, las_python_compile_fn compile,
+                     las_python_link_fn link, las_python_progress_fn progress, void *opaque,
+                     char *error, size_t error_size) {
+    if (!identity || !compile || !link) {
+        if (error && error_size) snprintf(error, error_size, "Missing embedded compiler callbacks");
+        return -1;
+    }
+    return invoke(root, native_dir, game, assets, identity, compile, link, progress, opaque, error, error_size);
 }

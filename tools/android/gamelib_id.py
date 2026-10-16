@@ -12,6 +12,8 @@ SOURCES = (
     "tools/rando/patch_variants.json", "tools/gamelib_entry.c",
     "runtime/hle/hle_symbols.txt", "runtime/cpu.h", "runtime/simd.h",
     "runtime/simd_fp.h", "runtime/gamelib.h",
+    "tools/android/embedded_generate.py", "tools/android/compilation_cache.py",
+    "android/app/src/main/cpp/embedded_compiler.cpp", "android/app/src/main/cpp/python_generator.c",
 )
 COMPILE_FLAGS = (
     "-O1", "-fPIC", "-fno-strict-aliasing", "-fvisibility=hidden",

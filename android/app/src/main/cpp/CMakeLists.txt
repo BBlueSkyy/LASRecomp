@@ -43,7 +43,8 @@ target_link_options(lasrecomp PRIVATE "-Wl,-z,global" "-Wl,-z,nostart-stop-gc" "
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 file(GLOB_RECURSE GAMELIB_INPUTS CONFIGURE_DEPENDS "${ROOT}/tools/*.py" "${ROOT}/tools/rando/patch_variants.json"
     "${ROOT}/tools/gamelib_entry.c" "${ROOT}/runtime/*.h" "${ROOT}/runtime/hle/hle_symbols.txt")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${GAMELIB_INPUTS})
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${GAMELIB_INPUTS}
+    "${CMAKE_CURRENT_SOURCE_DIR}/embedded_compiler.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/python_generator.c")
 execute_process(COMMAND "${Python3_EXECUTABLE}" "${ROOT}/tools/android/gamelib_id.py" --root "${ROOT}"
     OUTPUT_VARIABLE ANDROID_GAMELIB_ID OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
 target_compile_definitions(lasrecomp PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1 GAMELIB_ID="${ANDROID_GAMELIB_ID}")
@@ -82,4 +83,27 @@ if(LARECOMP_ANDROID_CUSTOM_VULKAN)
     list(REMOVE_ITEM RUNTIME_LIBRARIES vulkan)
     set_property(TARGET lasrecomp PROPERTY LINK_LIBRARIES "${RUNTIME_LIBRARIES}")
     target_link_libraries(lasrecomp PRIVATE adrenotools)
+endif()
+
+if(LARECOMP_ANDROID_EMBEDDED_SETUP)
+    set(PYTHON_ROOT "${DEPS}/python")
+    set(COMPILER_ROOT "${DEPS}/compiler")
+    if(NOT EXISTS "${PYTHON_ROOT}/lib/libpython3.14.so" OR NOT EXISTS "${COMPILER_ROOT}/include/clang/Frontend/CompilerInstance.h")
+        message(FATAL_ERROR "Build Python and compiler dependencies before enabling embedded setup")
+    endif()
+    file(GLOB COMPILER_ARCHIVES CONFIGURE_DEPENDS "${COMPILER_ROOT}/lib/*.a")
+    if(NOT COMPILER_ARCHIVES)
+        message(FATAL_ERROR "Embedded Clang/LLVM/LLD archives are missing")
+    endif()
+    add_library(embedded_python SHARED IMPORTED)
+    set_target_properties(embedded_python PROPERTIES IMPORTED_LOCATION "${PYTHON_ROOT}/lib/libpython3.14.so")
+    add_library(las_setup SHARED python_generator.c embedded_compiler.cpp setup_jni.cpp
+        "${ROOT}/runtime/platform/android_prepare.c" "${ROOT}/runtime/romfs_build.c")
+    target_include_directories(las_setup PRIVATE "${ROOT}/runtime" "${COMPILER_ROOT}/include"
+        "${PYTHON_ROOT}/include/python3.14")
+    target_compile_definitions(las_setup PRIVATE GAMELIB_ID="${ANDROID_GAMELIB_ID}")
+    target_compile_options(las_setup PRIVATE -fno-rtti -fno-strict-aliasing -Wall -Wno-format)
+    target_link_options(las_setup PRIVATE "-Wl,--no-undefined")
+    target_link_libraries(las_setup PRIVATE embedded_python "-Wl,--start-group" ${COMPILER_ARCHIVES}
+        "-Wl,--end-group" android log dl m z)
 endif()

@@ -24,7 +24,7 @@ final class EmbeddedAssets {
         File destination = new File(parent, identity);
         File marker = new File(destination, ".complete");
         if (destination.exists()) {
-            if (marker.isFile() && identity.equals(Files.readString(marker.toPath()))) return destination;
+            if (marker.isFile() && identity.equals(new String(Files.readAllBytes(marker.toPath()), StandardCharsets.UTF_8))) return destination;
             throw new IOException("Incomplete embedded installation retained at " + destination);
         }
         File stage = new File(parent, identity + ".partial-" + UUID.randomUUID());
