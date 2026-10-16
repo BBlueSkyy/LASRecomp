@@ -10,11 +10,22 @@ import org.libsdl.app.SDLActivity;
 /** SDL owns surface, controller discovery, audio and Android pause/resume. */
 public final class GameActivity extends SDLActivity {
     private TouchControls controls;
+    private static native void configureDriver(String mode, String directory, String library,
+            String nativeLibraryDir, String temporaryDirectory);
 
     @Override protected String[] getLibraries() {
         return new String[]{"las_platform", "SDL3", "lasrecomp"};
     }
     @Override protected String[] getArguments() {
+        // Dormant until native driver-provider integration is explicitly enabled by the launcher.
+        if (getIntent().getBooleanExtra("configure_driver", false)) {
+            String mode = getIntent().getStringExtra(DriverImporter.MODE);
+            String directory = getIntent().getStringExtra(DriverImporter.DIRECTORY);
+            String library = getIntent().getStringExtra(DriverImporter.LIBRARY);
+            configureDriver(mode == null ? "system" : mode, directory == null ? "" : directory,
+                    library == null ? "" : library, getApplicationInfo().nativeLibraryDir,
+                    getCacheDir().getAbsolutePath());
+        }
         return new String[]{new File(getFilesDir(), "extracted").getAbsolutePath(), "--play"};
     }
 
