@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from compilation_cache import build_cached, cache_ready
+from gamelib_id import COMPILE_FLAGS, LINK_FLAGS, gamelib_id
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -87,10 +89,43 @@ class EmbeddedGeneratorTests(unittest.TestCase):
             ndk = os.environ.get('ANDROID_NDK_HOME')
             if ndk:
                 target = Path(ndk) / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang'
-                for name in ('main', 'sdk'):
-                    for unit in sorted((stage / 'output' / name).glob('*.c')):
-                        subprocess.run([str(target), '-fPIC', '-O1', '-I', str(ROOT / 'runtime'),
-                                        '-c', str(unit), '-o', str(stage / (unit.stem + '.o'))], check=True)
+                runtime = stage / 'liblasrecomp.so'
+                # These are actual runtime sources, not import stubs. This fixture
+                # exercises their ARM64 link boundary, not Android execution.
+                subprocess.run([str(target), '-shared', '-fPIC', '-O1', '-I', str(ROOT / 'runtime'),
+                                str(ROOT / 'runtime/fnprof.c'), str(ROOT / 'runtime/platform/android.c'),
+                                '-Wl,-soname,liblasrecomp.so', '-llog', '-ldl', '-o', str(runtime)], check=True)
+                identity = gamelib_id(ROOT)
+                compiled = []
+
+                def compile_one(unit, obj):
+                    compiled.append(unit)
+                    subprocess.run([str(target), *COMPILE_FLAGS, f'-DGAMELIB_ID="{identity}"',
+                                    '-I', str(ROOT / 'runtime'), '-c', unit, '-o', obj], check=True)
+
+                def link(objects, output):
+                    subprocess.run([str(target), *LINK_FLAGS, *objects, str(runtime), '-lm',
+                                    '-o', output], check=True)
+
+                # The APK uses in-process callbacks. The host fixture deliberately
+                # substitutes the NDK CLI to validate the same coordinator/output.
+                previous = sys.modules.get('embedded_generate')
+                sys.modules['embedded_generate'] = embedded
+                sys.path.insert(0, str(tools))
+                try:
+                    build_cached(game, ROOT / 'tools', identity, compile_one, link)
+                    self.assertTrue(cache_ready(game, identity))
+                    self.assertGreaterEqual(len(compiled), 5)
+                    count = len(compiled)
+                    build_cached(game, ROOT / 'tools', identity, compile_one, link)
+                    self.assertEqual(len(compiled), count, 'cache hit must skip generation and compilation')
+                    self.assertFalse(list(game.glob('.las-build-*')))
+                finally:
+                    sys.path.pop(0)
+                    if previous is None:
+                        sys.modules.pop('embedded_generate', None)
+                    else:
+                        sys.modules['embedded_generate'] = previous
 
 
 if __name__ == '__main__':
