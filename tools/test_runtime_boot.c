@@ -10,6 +10,8 @@
 #include "../runtime/kernel.h"
 
 static _Atomic int completed;
+static pthread_mutex_t completed_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t completed_changed = PTHREAD_COND_INITIALIZER;
 static int empty_sdk;
 static void compiled_sdk(Cpu *c) { c->x[0] += 7; }
 HLE_FUNC("fixture_hle", fixture_hle) { c->x[0] += 11; }
@@ -30,7 +32,10 @@ static void compiled_main(Cpu *c) {
     assert(c->x[0] == 19);
     assert(*(uint64_t *)(MAIN_BASE + 0x2010) == 0);
     assert(*(uint64_t *)(MAIN_BASE + 0x2018) == MAIN_BASE + 0x80);
+    pthread_mutex_lock(&completed_lock);
     atomic_fetch_add(&completed, 1);
+    pthread_cond_signal(&completed_changed);
+    pthread_mutex_unlock(&completed_lock);
 }
 static const uint64_t main_addrs[] = {MAIN_BASE + 0x80}, sdk_addrs[] = {SDK_BASE + 0x80};
 static const GuestFn main_fns[] = {compiled_main}, sdk_fns[] = {compiled_sdk};
@@ -69,7 +74,9 @@ int main(int argc, char **argv) {
         assert(loader_find_symbol("fixture_sdk") == SDK_BASE + 0x80);
         KThread *t = kernel_create_main_thread(MAIN_BASE + 0x80, 0x100000, 44);
         kernel_run_main(t, t->handle, 0, 0, 0);
-        for (int n = 0; n < 5000 && atomic_load(&completed) != boot + 1; ++n) usleep(1000);
+        pthread_mutex_lock(&completed_lock);
+        while (atomic_load(&completed) != boot + 1) pthread_cond_wait(&completed_changed, &completed_lock);
+        pthread_mutex_unlock(&completed_lock);
         assert(atomic_load(&completed) == boot + 1);
         kernel_stop_threads(NULL);
         kernel_reset();
